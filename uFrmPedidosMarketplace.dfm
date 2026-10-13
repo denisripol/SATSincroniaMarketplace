@@ -1,4 +1,4 @@
-object FrmPedidosMarketplace: TFrmPedidosMarketplace
+﻿object FrmPedidosMarketplace: TFrmPedidosMarketplace
   Left = 0
   Top = 0
   Caption = 'Pedidos - Marketplace'
@@ -74,6 +74,7 @@ object FrmPedidosMarketplace: TFrmPedidosMarketplace
     Options = [goFixedVertLine, goFixedHorzLine, goVertLine, goHorzLine, goRowSelect]
     TabOrder = 1
     OnClick = GridClick
+    OnSelectCell = GridSelectCell
     ColWidths = (
       190
       150

@@ -112,6 +112,8 @@ type
     procedure CmdAtualizarClick(Sender: TObject);
 
     procedure GridClick(Sender: TObject);
+    procedure GridSelectCell(Sender: TObject; ACol, ARow: Integer;
+      var CanSelect: Boolean);
 
     procedure CmdDespacharClick(Sender: TObject);
 
@@ -198,6 +200,7 @@ type
 
     procedure CarregarPedidosTikTokShop;
 
+    procedure AtualizarEstadoBotoes(const ALinha: Integer = -1);
     function PedidoSelecionado(out AOrderSN: string): Boolean;
 
     function StatusIndicaDespachado(const AStatus: string): Boolean;
@@ -385,6 +388,10 @@ begin
     Log('Gestao de pedidos ainda nao implementada para este marketplace.');
 
   end;
+
+  // Lista recarregada: reavalia os botoes sem depender de um clique do usuario.
+
+  AtualizarEstadoBotoes;
 
 end;
 
@@ -918,23 +925,51 @@ end;
 
 
 
-procedure TFrmPedidosMarketplace.GridClick(Sender: TObject);
+// Reavalia quais botoes de acao ficam habilitados, conforme o marketplace e o
+
+// status do pedido selecionado. Chamada em quatro momentos: clique na grade,
+
+// troca de selecao pelo teclado, fim do carregamento da lista e fim de cada
+
+// acao - antes isso vivia dentro do GridClick, entao os botoes so refletiam a
+
+// selecao DEPOIS de um clique: recarregar a lista deixava tudo cinza mesmo com
+
+// a primeira linha ja selecionada.
+
+procedure TFrmPedidosMarketplace.AtualizarEstadoBotoes(const ALinha: Integer = -1);
 
 var
 
-  OrderSN, Status: string;
+  Status: string;
+
+  Linha: Integer;
 
   TemPedidoSelecionado: Boolean;
 
 begin
 
-  TemPedidoSelecionado := PedidoSelecionado(OrderSN);
+  // {ALINHA} vindo >= 0, e' a linha que o grid ESTA PASSANDO a selecionar - o
 
+  // OnSelectCell dispara ANTES de Grid.Row mudar, entao usar Grid.Row ali
 
+  // deixaria os botoes sempre uma selecao atrasados. -1 = usar a selecao atual.
+
+  if ALinha >= 0 then
+
+    Linha := ALinha
+
+  else
+
+    Linha := Grid.Row;
+
+  TemPedidoSelecionado := (Linha >= 1) and (Linha < Grid.RowCount) and
+
+    (Trim(Grid.Cells[0, Linha]) <> '');
 
   if TemPedidoSelecionado then
 
-    Status := Grid.Cells[1, Grid.Row]
+    Status := Grid.Cells[1, Linha]
 
   else
 
@@ -1051,6 +1086,34 @@ begin
   // ja foi despachado (antes disso nao faz sentido gerar a venda no SAT).
 
   CmdBaixarPedidoSAT.Enabled := TemPedidoSelecionado and StatusIndicaDespachado(Status);
+
+end;
+
+// Clique do mouse na grade.
+
+procedure TFrmPedidosMarketplace.GridClick(Sender: TObject);
+
+begin
+
+  AtualizarEstadoBotoes;
+
+end;
+
+// Troca de selecao, inclusive pelas setas do teclado - o OnClick nao cobre
+
+// navegacao por teclado. ARow e' a linha de DESTINO, ainda nao refletida em
+
+// Grid.Row, por isso vai como parametro.
+
+procedure TFrmPedidosMarketplace.GridSelectCell(Sender: TObject; ACol,
+
+  ARow: Integer; var CanSelect: Boolean);
+
+begin
+
+  CanSelect := True;
+
+  AtualizarEstadoBotoes(ARow);
 
 end;
 
