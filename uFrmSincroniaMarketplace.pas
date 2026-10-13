@@ -90,6 +90,9 @@ type
     FRefreshTokenDecriptado: string;
     // Validade do access token (MARKETPLACE_BD, texto puro - nao e' sensivel).
     FTokenExpiraEm: TDateTime;
+    // Qual dos quatro precos do produto (PVend..PVend4) esta loja usa. Vai como
+    // string porque e'' isso que o Funcoes.BuscarPrecoDeVenda espera.
+    FPrecoPadraoLoja: string;
     FAccountIDDecriptado: string;
     // Credenciais de desenvolvedor da loja (agora vem do banco, nao mais de
     // .ini) - lidas em AtualizarStatusConexao, ja escolhendo o par certo
@@ -111,6 +114,13 @@ type
     // banco. Chamar antes de cada operacao: o Sincronia fica horas aberto e o
     // token da Amazon vale 1 hora. False = nao foi possivel renovar.
     function GarantirTokenValido: Boolean;
+    // Preco de venda do produto para a loja conectada. Devolve False quando nao
+    // foi possivel calcular - nesse caso o F2 envia so'' o estoque.
+    function PrecoDeVendaDoProduto(const ACodProduto: Integer;
+      out APreco: Double): Boolean;
+    // Calcula o preco e ja grava na foto local. False = nao ha preco pra enviar.
+    function PrepararPrecoParaEnvio(const ACodProduto: Integer;
+      out APreco: Double): Boolean;
     procedure EnviarEstoqueShopee;
     procedure EnviarEstoqueAmazon;
     procedure EnviarEstoqueMagalu;
@@ -337,7 +347,7 @@ begin
     Qry.SQL.Text :=
       'SELECT LOJAD, MARKETPLACE_COD, MARKETPLACE_CLIENTID, MARKETPLACE_TOKEN, ' +
       'MARKETPLACE_KEY, MARKETPLACE_SANDBOX, MARKETPLACE_USUARIO, MARKETPLACE_SENHA, ' +
-      'MARKETPLACE_BD, ' +
+      'MARKETPLACE_BD, PRECODEVENDAPADRAO, ' +
       'MARKETPLACE_APP_DEV_ID, MARKETPLACE_APP_DEV_ID_SANDBOX ' +
       'FROM LOJAS WHERE LOJA = :LOJA';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
@@ -356,6 +366,10 @@ begin
     // Gravado como texto por DateTimeToStr - 0 quando a loja foi conectada por
     // uma versao antiga, que ainda nao guardava a validade.
     FTokenExpiraEm := StrToDateTimeDef(Qry.FieldByName('MARKETPLACE_BD').AsString, 0);
+    // Vazio ou 0 significa ''Preco 1'' - mesma leitura que o cadastro de Lojas faz.
+    FPrecoPadraoLoja := Trim(Qry.FieldByName('PRECODEVENDAPADRAO').AsString);
+    if StrToIntDef(FPrecoPadraoLoja, 0) = 0 then
+      FPrecoPadraoLoja := '1';
     // Credenciais de desenvolvedor - a pedido do cliente, agora usam os
     // campos ja existentes MARKETPLACE_USUARIO/MARKETPLACE_SENHA (mesmos
     // campos usados por outros tipos de e-commerce como VTex/Bagy/Tray) em
@@ -416,6 +430,101 @@ begin
     Log('Envio de dados ainda nao implementado para este marketplace.');
   end;
 end;
+// Preco de venda do produto para a loja conectada ao marketplace.
+// {IMPORTANTE} nao reimplementa regra de preco nenhuma: chama a MESMA funcao
+// que as telas de venda do SAT usam (Funcoes.BuscarPrecoDeVenda), entao gestao
+// de precos, promocao por data/dia-da-semana/quantidade e a escolha entre
+// PVend 1..4 conforme a loja saem identicas ao que o operador ve no balcao.
+// A funcao tambem resolve sozinha qual versao datada da procedure chamar, pela
+// constante Versao_Necessaria_BuscarPrecoDeVenda.
+// {DECISAO} envia o PRECO DE VENDA, nao o promocional. Promocao de loja fisica
+// tem prazo e regra propria (dia da semana, quantidade minima) que marketplace
+// nenhum dos cinco representa igual - replicar isso venderia com desconto fora
+// das condicoes que o justificam. Quando os dois diferem, o log registra, pra
+// o cliente poder rever essa escolha com numero na mao.
+function TFrmSincroniaMarketplace.PrecoDeVendaDoProduto(const ACodProduto: Integer;
+  out APreco: Double): Boolean;
+var
+  QryProd: TFDQuery;
+  PrecoDeVenda, PrecoPromocional, QtdePromocional: Real;
+begin
+  Result := False;
+  APreco := 0;
+  QryProd := TFDQuery.Create(nil);
+  try
+    QryProd.Connection := DZ.ZDatabase;
+    // SELECT * porque a funcao le PVend, PVend2, PVend3, PVend4, COD e, quando
+    // existe, UTILIZARPRECOSDIFERENCIADOS - direto deste dataset.
+    QryProd.SQL.Text := 'SELECT * FROM PROD WHERE COD = :COD';
+    QryProd.ParamByName('COD').AsInteger := ACodProduto;
+    QryProd.Open;
+    if QryProd.IsEmpty then
+    begin
+      Log('  Produto ' + IntToStr(ACodProduto) + ' nao encontrado em PROD - ' +
+        'preco nao enviado (estoque segue normalmente).');
+      Exit;
+    end;
+    PrecoDeVenda := 0;
+    PrecoPromocional := 0;
+    QtdePromocional := 0;
+    APreco := Funcoes.BuscarPrecoDeVenda(QryProd, FPrecoPadraoLoja, 1,
+      FLojaSelecionada, vg.dDataAtual, '', PrecoDeVenda, PrecoPromocional,
+      QtdePromocional);
+    if APreco <= 0 then
+    begin
+      // Preco zerado quase sempre e' cadastro incompleto. Enviar zero pro
+      // marketplace seria pior que nao enviar: coloca o produto a venda de
+      // graca. Entao avisa e deixa o preco como esta la'.
+      Log('  Produto ' + IntToStr(ACodProduto) + ' com preco zerado - preco NAO ' +
+        'enviado, para nao publicar o item a R$ 0,00. Confira o cadastro.');
+      APreco := 0;
+      Exit;
+    end;
+    if (PrecoPromocional > 0) and (PrecoPromocional < PrecoDeVenda) then
+      Log(Format('  Produto %d tem promocao vigente (R$ %s) - enviando o preco ' +
+        'normal (R$ %s), conforme definido.',
+        [ACodProduto, FormatFloat('0.00', PrecoPromocional),
+         FormatFloat('0.00', APreco)]));
+    Result := True;
+  finally
+    QryProd.Free;
+  end;
+end;
+
+// Calcula o preco do produto e ja atualiza a "foto" em PRODUTOS_MARKETPLACE.
+// Devolve False quando nao ha preco valido - nesse caso o chamador NAO deve
+// chamar a API de preco do marketplace.
+// {DECISAO} o preco e' BEST-EFFORT, separado do estoque: se o envio de preco
+// falhar, o estoque ja' enviado continua valendo e a flag do PRO e' limpa do
+// mesmo jeito. O contrario (deixar o produto pendente ate o preco passar) faria
+// o F2 reenviar estoque indefinidamente num produto cujo preco a Amazon recusa
+// por limite minimo/maximo, por exemplo. A falha fica registrada no log.
+function TFrmSincroniaMarketplace.PrepararPrecoParaEnvio(const ACodProduto: Integer;
+  out APreco: Double): Boolean;
+var
+  QryPreco: TFDQuery;
+begin
+  APreco := 0;
+  Result := PrecoDeVendaDoProduto(ACodProduto, APreco);
+  if not Result then
+    Exit;
+  QryPreco := TFDQuery.Create(nil);
+  try
+    QryPreco.Connection := DZ.ZDatabase;
+    QryPreco.SQL.Text :=
+      'UPDATE PRODUTOS_MARKETPLACE SET PRECO = :PRECO, DATAULTIMAALTERACAO = :DATA ' +
+      'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
+    QryPreco.ParamByName('PRECO').AsFloat := APreco;
+    QryPreco.ParamByName('DATA').AsDateTime := Now;
+    QryPreco.ParamByName('COD').AsInteger := ACodProduto;
+    QryPreco.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+    QryPreco.ParamByName('MKT').AsInteger := FCodMarketplace;
+    QryPreco.ExecSQL;
+  finally
+    QryPreco.Free;
+  end;
+end;
+
 procedure TFrmSincroniaMarketplace.EnviarEstoqueShopee;
 var
   Qry, QryAux: TFDQuery;
@@ -423,6 +532,7 @@ var
   ErroMsg, ItemID: string;
   CodProduto, Estoque: Integer;
   iSucesso, iFalha: Integer;
+  Preco: Double;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -510,6 +620,20 @@ begin
                StrToInt64Def(ItemID, 0), 0, Estoque, ErroMsg) then
           begin
             Inc(iSucesso);
+            // Preco: enviado logo apos o estoque, como passo separado. Falha aqui
+
+            // NAO desfaz o estoque nem segura a flag - ver PrepararPrecoParaEnvio.
+
+            if PrepararPrecoParaEnvio(CodProduto, Preco) then
+            if not Cliente.UpdatePrice(FTokenDecriptado,
+
+                 StrToInt64Def(FAccountIDDecriptado, 0), StrToInt64Def(ItemID, 0), 0,
+
+                 Preco, ErroMsg) then
+              Log('  Aviso: estoque enviado, mas o preco do produto ' +
+
+                IntToStr(CodProduto) + ' falhou: ' + ErroMsg);
+
             // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
             // se a chamada falhar, o produto continua marcado e sera
             // reprocessado na proxima execucao do F2.
@@ -550,6 +674,7 @@ var
   ErroMsg, RespostaJSON, Sku: string;
   CodProduto, Estoque: Integer;
   iSucesso, iFalha: Integer;
+  Preco: Double;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -630,6 +755,18 @@ begin
                Estoque, RespostaJSON, ErroMsg) then
           begin
             Inc(iSucesso);
+            // Preco: enviado logo apos o estoque, como passo separado. Falha aqui
+
+            // NAO desfaz o estoque nem segura a flag - ver PrepararPrecoParaEnvio.
+
+            if PrepararPrecoParaEnvio(CodProduto, Preco) then
+            if not Cliente.UpdateSalePrice(FTokenDecriptado, FAccountIDDecriptado,
+
+                 Sku, Preco, RespostaJSON, ErroMsg) then
+              Log('  Aviso: estoque enviado, mas o preco do produto ' +
+
+                IntToStr(CodProduto) + ' falhou: ' + ErroMsg);
+
             // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
             // se a chamada falhar, o produto continua marcado e sera
             // reprocessado na proxima execucao do F2.
@@ -670,6 +807,7 @@ var
   ErroMsg, Sku: string;
   CodProduto, Estoque: Integer;
   iSucesso, iFalha: Integer;
+  Preco: Double;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -761,6 +899,18 @@ begin
                Estoque, ErroMsg) then
           begin
             Inc(iSucesso);
+            // Preco: enviado logo apos o estoque, como passo separado. Falha aqui
+
+            // NAO desfaz o estoque nem segura a flag - ver PrepararPrecoParaEnvio.
+
+            if PrepararPrecoParaEnvio(CodProduto, Preco) then
+            if not Cliente.UpdatePrice(FTokenDecriptado, FAccountIDDecriptado,
+
+                 Sku, Preco, ErroMsg) then
+              Log('  Aviso: estoque enviado, mas o preco do produto ' +
+
+                IntToStr(CodProduto) + ' falhou: ' + ErroMsg);
+
             // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
             // se a chamada falhar, o produto continua marcado e sera
             // reprocessado na proxima execucao do F2.
@@ -801,6 +951,7 @@ var
   ErroMsg, ItemID: string;
   CodProduto, Estoque: Integer;
   iSucesso, iFalha: Integer;
+  Preco: Double;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -888,9 +1039,25 @@ begin
           QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
           QryAux.ExecSQL;
           // 2) Chama a API do Mercado Livre pra atualizar de verdade.
-          if Cliente.UpdateStock(FTokenDecriptado, ItemID, Estoque, ErroMsg) then
+
+          // {ML} unico dos cinco em que estoque e preco vao na MESMA chamada - o
+
+          // PUT /items/{id} aceita os dois campos no mesmo corpo. Por isso aqui o
+
+          // preco e calculado ANTES, e nao depois como nos outros quatro.
+
+          if not PrepararPrecoParaEnvio(CodProduto, Preco) then
+
+            Preco := 0; // sem preco valido no cadastro: envia so o estoque
+
+          if Cliente.UpdateStockAndPrice(FTokenDecriptado, ItemID, Estoque, Preco,
+
+               ErroMsg) then
+
           begin
+
             Inc(iSucesso);
+
             // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
             // se a chamada falhar, o produto continua marcado e sera
             // reprocessado na proxima execucao do F2.
@@ -932,6 +1099,7 @@ var
   ErroMsg, ChaveTikTok, ProductId, SkuId, ShopId, ShopCipher, WarehouseId: string;
   CodProduto, Estoque, I: Integer;
   iSucesso, iFalha: Integer;
+  Preco: Double;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -1050,6 +1218,18 @@ begin
                WarehouseId, Estoque, ErroMsg) then
           begin
             Inc(iSucesso);
+            // Preco: enviado logo apos o estoque, como passo separado. Falha aqui
+
+            // NAO desfaz o estoque nem segura a flag - ver PrepararPrecoParaEnvio.
+
+            if PrepararPrecoParaEnvio(CodProduto, Preco) then
+            if not Cliente.UpdatePrice(FTokenDecriptado, ShopCipher, ProductId,
+
+                 SkuId, Preco, ErroMsg) then
+              Log('  Aviso: estoque enviado, mas o preco do produto ' +
+
+                IntToStr(CodProduto) + ' falhou: ' + ErroMsg);
+
             // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
             // se a chamada falhar, o produto continua marcado e sera
             // reprocessado na proxima execucao do F2.
