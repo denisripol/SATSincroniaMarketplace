@@ -210,7 +210,14 @@ begin
   Grid.Cells[COL_VINCULO_VIRTUAL, 0] := 'Vínculo Virtual';
   // Filtros com um padrao razoavel - ultimos 30 dias de atualizacao, todos
   // os status, sem filtro de texto. O usuario ajusta e clica em "Consultar".
-  dtpDataDe.Date := IncDay(Now, -30);
+  // {ATENCAO} um ANO pra tras, nao 30 dias. Essa data filtra pela ULTIMA
+  // EDICAO DO ANUNCIO no marketplace - e alterar estoque ou preco por API NAO
+  // conta como edicao (confirmado na Shopee em 14/10/2026: anuncio editado em
+  // 31/07 manteve update_time de 31/07 depois do F2 mexer nos dois). Com 30
+  // dias, produto ativo e vendendo havia meses simplesmente nao aparecia, e a
+  // tela dizia "0 produtos" como se a loja estivesse vazia.
+  // A Shopee nao limita o tamanho dessa janela (testado com 286 dias).
+  dtpDataDe.Date := IncYear(Now, -1);
   dtpDataAte.Date := Now;
   cbxStatus.Items.Clear;
   cbxStatus.Items.Add('Todos');

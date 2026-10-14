@@ -1,4 +1,4 @@
-object FrmOfertasMarketplace: TFrmOfertasMarketplace
+﻿object FrmOfertasMarketplace: TFrmOfertasMarketplace
   Left = 0
   Top = 0
   Caption = 'Ofertas - Marketplace'
@@ -48,14 +48,14 @@ object FrmOfertasMarketplace: TFrmOfertasMarketplace
       Top = 10
       Width = 55
       Height = 15
-      Caption = 'Atualiz. de'
+      Caption = 'Anuncio editado de'
     end
     object lblDataAte: TLabel
       Left = 136
       Top = 10
       Width = 58
       Height = 15
-      Caption = 'Atualiz. at'#233
+      Caption = 'at'#233
     end
     object lblStatus: TLabel
       Left = 256
