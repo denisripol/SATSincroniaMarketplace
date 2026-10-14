@@ -10,7 +10,7 @@
 //
 // BOTOES:
 //   F2 - Envia Dados      -> envia pro marketplace o estoque dos produtos
-//                            marcados com ALTERA_MARKETPLACE = 'S' (baixa
+//                            marcados em PRO.ALTERARNOECOMMERCE = 'T' (estoque)
 //                            de estoque do fisico -> virtual). Implementado
 //                            para Shopee, Amazon, Magalu, Mercado Livre e
 //                            TikTok Shop.
@@ -533,6 +533,7 @@ var
   CodProduto, Estoque: Integer;
   iSucesso, iFalha: Integer;
   Preco: Double;
+  EnviarEstoque, EnviarPreco, OKEstoque: Boolean;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -540,7 +541,8 @@ begin
       'loja/ambiente (verifique MARKETPLACE_USUARIO/MARKETPLACE_SENHA na tabela Lojas).');
     Exit;
   end;
-  Log('Buscando produtos com alteracao pendente (ALTERA_MARKETPLACE = S)...');
+  Log('Buscando produtos marcados para envio (estoque: ALTERARNOECOMMERCE = T; ' +
+    'preco: ATUALIZARMARKETPLACE = S)...');
   Qry := TFDQuery.Create(nil);
   QryAux := TFDQuery.Create(nil);
   try
@@ -554,15 +556,16 @@ begin
     // loja conectada, nunca a fisica).
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE P.ALTERA_MARKETPLACE = ''S'' ' +
-      'AND EXISTS (SELECT 1 FROM LOJAS L ' +
+      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
         'WHERE L.CODLOJAENTREGA = 1 ' +
         'AND L.CODLOJAENTREGA = P.LOJA ' +
         'AND L.LOJA = :LOJA) ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
-        'AND PM.ATUALIZAR_ESTOQUE_MARKETPLACE = ''S'')';
+        'AND ((P.ALTERARNOECOMMERCE = ''T'' ' +
+             'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
+          'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
     Qry.Open;
     if Qry.IsEmpty then
@@ -585,7 +588,10 @@ begin
         // Busca o item_id da Shopee vinculado a esse produto fisico.
         QryAux.Close;
         QryAux.SQL.Text :=
-          'SELECT CODPRODUTONOMARKETPLACE FROM PRODUTOS_MARKETPLACE ' +
+          'SELECT CODPRODUTONOMARKETPLACE, ' +
+          'COALESCE(ESTOQUE_INFINITO, 0) AS ESTOQUE_INFINITO, ' +
+          'COALESCE(ATUALIZARMARKETPLACE, ''N'') AS ATUALIZARMARKETPLACE ' +
+          'FROM PRODUTOS_MARKETPLACE ' +
           'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
         QryAux.ParamByName('COD').AsInteger := CodProduto;
         QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
@@ -599,32 +605,70 @@ begin
         else
         begin
           ItemID := QryAux.FieldByName('CODPRODUTONOMARKETPLACE').AsString;
+
+          // {DECISAO DO CLIENTE - 14/10/2026} dois gates INDEPENDENTES:
+
+          //   ESTOQUE -> PRO.ALTERARNOECOMMERCE = 'T', e NAO envia quando o
+
+          //              produto esta marcado como estoque infinito.
+
+          //   PRECO   -> PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE = 'S'.
+
+          // Um produto pode entrar na lista por um gate e nao pelo outro, por
+
+          // isso os dois sao avaliados aqui, por produto, e nao na consulta.
+
+          // {ATENCAO} nenhum dos dois campos e' limpo por esta rotina - quem
+
+          // gerencia e' o cliente, por rotina propria (PRO) e por tela (PM).
+
+          EnviarEstoque := (Trim(Qry.FieldByName('ALTERARNOECOMMERCE').AsString) = 'T') and
+
+            (QryAux.FieldByName('ESTOQUE_INFINITO').AsInteger <> 1);
+
+          EnviarPreco := QryAux.FieldByName('ATUALIZARMARKETPLACE').AsString = 'S';
           QryAux.Close;
-          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE primeiro.
-          QryAux.SQL.Text :=
-            'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
-            'DATAULTIMAALTERACAO = :DATA ' +
-            'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
-          QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
-          QryAux.ParamByName('DATA').AsDateTime := Now;
-          QryAux.ParamByName('COD').AsInteger := CodProduto;
-          QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-          QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
-          QryAux.ExecSQL;
+          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE - so quando o estoque
+
+          // vai mesmo ser enviado, senao a foto mostraria uma quantidade que o
+
+          // marketplace nunca recebeu (caso do estoque infinito).
+
+          if EnviarEstoque then
+
+          begin
+            QryAux.SQL.Text :=
+              'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
+              'DATAULTIMAALTERACAO = :DATA ' +
+              'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
+            QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
+            QryAux.ParamByName('DATA').AsDateTime := Now;
+            QryAux.ParamByName('COD').AsInteger := CodProduto;
+            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+            QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
+            QryAux.ExecSQL;
+
+          end;
           // 2) Chama a API da Shopee pra atualizar de verdade.
           // {TODO} AModelID fixo em 0 (item sem variacao) - produtos COM
           // variacao (cor/tamanho) precisam de um model_id especifico, que
           // ainda nao guardamos em PRODUTOS_MARKETPLACE. Se o cliente vender
           // produto com variacao, essa parte precisa ser expandida.
-          if Cliente.UpdateStock(FTokenDecriptado, StrToInt64Def(FAccountIDDecriptado, 0),
-               StrToInt64Def(ItemID, 0), 0, Estoque, ErroMsg) then
+          OKEstoque := True;
+
+          if EnviarEstoque then
+
+            OKEstoque := Cliente.UpdateStock(FTokenDecriptado, StrToInt64Def(FAccountIDDecriptado, 0),
+                 StrToInt64Def(ItemID, 0), 0, Estoque, ErroMsg);
+
+          if OKEstoque then
           begin
             Inc(iSucesso);
             // Preco: enviado logo apos o estoque, como passo separado. Falha aqui
 
             // NAO desfaz o estoque nem segura a flag - ver PrepararPrecoParaEnvio.
 
-            if PrepararPrecoParaEnvio(CodProduto, Preco) then
+            if EnviarPreco and PrepararPrecoParaEnvio(CodProduto, Preco) then
             if not Cliente.UpdatePrice(FTokenDecriptado,
 
                  StrToInt64Def(FAccountIDDecriptado, 0), StrToInt64Def(ItemID, 0), 0,
@@ -634,20 +678,15 @@ begin
 
                 IntToStr(CodProduto) + ' falhou: ' + ErroMsg);
 
-            // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
-            // se a chamada falhar, o produto continua marcado e sera
-            // reprocessado na proxima execucao do F2.
-            // {DECISAO DO CLIENTE - 07/09/2026} o ATUALIZAR_ESTOQUE_MARKETPLACE
-            // do PRODUTOS_MARKETPLACE NAO e' mais limpo aqui. Ele deixou de ser
-            // "tem envio pendente" e passou a ser "este produto participa do
-            // sincronismo de estoque", entao fica sempre 'S'. Quem diz o que esta
-            // pendente e' o PRO.ALTERA_MARKETPLACE, que e' por loja.
-            QryAux.Close;
-            QryAux.SQL.Text :=
-              'UPDATE PRO SET ALTERA_MARKETPLACE = ''N'' WHERE COD = :COD AND LOJA = :LOJA';
-            QryAux.ParamByName('COD').AsInteger := CodProduto;
-            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-            QryAux.ExecSQL;
+            // {DECISAO DO CLIENTE - 14/10/2026} esta rotina NAO limpa mais flag
+
+            // nenhuma. O PRO.ALTERARNOECOMMERCE e' gerenciado por rotina propria do
+
+            // cliente, e o PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE por uma tela de
+
+            // produtos que eles vao criar. Enquanto as marcas ficarem ligadas, o F2
+
+            // reenvia os mesmos produtos a cada execucao - e isso e' esperado.
           end
           else
           begin
@@ -675,6 +714,7 @@ var
   CodProduto, Estoque: Integer;
   iSucesso, iFalha: Integer;
   Preco: Double;
+  EnviarEstoque, EnviarPreco, OKEstoque: Boolean;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -682,7 +722,8 @@ begin
       'loja/ambiente (verifique MARKETPLACE_USUARIO/MARKETPLACE_SENHA na tabela Lojas).');
     Exit;
   end;
-  Log('Buscando produtos com alteracao pendente (ALTERA_MARKETPLACE = S)...');
+  Log('Buscando produtos marcados para envio (estoque: ALTERARNOECOMMERCE = T; ' +
+    'preco: ATUALIZARMARKETPLACE = S)...');
   Qry := TFDQuery.Create(nil);
   QryAux := TFDQuery.Create(nil);
   try
@@ -692,15 +733,16 @@ begin
     // muda o metodo que efetivamente chama a API no final.
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE P.ALTERA_MARKETPLACE = ''S'' ' +
-      'AND EXISTS (SELECT 1 FROM LOJAS L ' +
+      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
         'WHERE L.CODLOJAENTREGA = 1 ' +
         'AND L.CODLOJAENTREGA = P.LOJA ' +
         'AND L.LOJA = :LOJA) ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
-        'AND PM.ATUALIZAR_ESTOQUE_MARKETPLACE = ''S'')';
+        'AND ((P.ALTERARNOECOMMERCE = ''T'' ' +
+             'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
+          'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
     Qry.Open;
     if Qry.IsEmpty then
@@ -723,7 +765,10 @@ begin
         // Busca o SKU da Amazon vinculado a esse produto fisico.
         QryAux.Close;
         QryAux.SQL.Text :=
-          'SELECT CODPRODUTONOMARKETPLACE FROM PRODUTOS_MARKETPLACE ' +
+          'SELECT CODPRODUTONOMARKETPLACE, ' +
+          'COALESCE(ESTOQUE_INFINITO, 0) AS ESTOQUE_INFINITO, ' +
+          'COALESCE(ATUALIZARMARKETPLACE, ''N'') AS ATUALIZARMARKETPLACE ' +
+          'FROM PRODUTOS_MARKETPLACE ' +
           'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
         QryAux.ParamByName('COD').AsInteger := CodProduto;
         QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
@@ -737,29 +782,67 @@ begin
         else
         begin
           Sku := QryAux.FieldByName('CODPRODUTONOMARKETPLACE').AsString;
+
+          // {DECISAO DO CLIENTE - 14/10/2026} dois gates INDEPENDENTES:
+
+          //   ESTOQUE -> PRO.ALTERARNOECOMMERCE = 'T', e NAO envia quando o
+
+          //              produto esta marcado como estoque infinito.
+
+          //   PRECO   -> PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE = 'S'.
+
+          // Um produto pode entrar na lista por um gate e nao pelo outro, por
+
+          // isso os dois sao avaliados aqui, por produto, e nao na consulta.
+
+          // {ATENCAO} nenhum dos dois campos e' limpo por esta rotina - quem
+
+          // gerencia e' o cliente, por rotina propria (PRO) e por tela (PM).
+
+          EnviarEstoque := (Trim(Qry.FieldByName('ALTERARNOECOMMERCE').AsString) = 'T') and
+
+            (QryAux.FieldByName('ESTOQUE_INFINITO').AsInteger <> 1);
+
+          EnviarPreco := QryAux.FieldByName('ATUALIZARMARKETPLACE').AsString = 'S';
           QryAux.Close;
-          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE primeiro.
-          QryAux.SQL.Text :=
-            'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
-            'DATAULTIMAALTERACAO = :DATA ' +
-            'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
-          QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
-          QryAux.ParamByName('DATA').AsDateTime := Now;
-          QryAux.ParamByName('COD').AsInteger := CodProduto;
-          QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-          QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
-          QryAux.ExecSQL;
+          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE - so quando o estoque
+
+          // vai mesmo ser enviado, senao a foto mostraria uma quantidade que o
+
+          // marketplace nunca recebeu (caso do estoque infinito).
+
+          if EnviarEstoque then
+
+          begin
+            QryAux.SQL.Text :=
+              'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
+              'DATAULTIMAALTERACAO = :DATA ' +
+              'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
+            QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
+            QryAux.ParamByName('DATA').AsDateTime := Now;
+            QryAux.ParamByName('COD').AsInteger := CodProduto;
+            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+            QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
+            QryAux.ExecSQL;
+
+          end;
           // 2) Chama a Amazon SP-API pra atualizar de verdade (descobre o
           // productType real do SKU sozinha antes de montar o PATCH).
-          if Cliente.UpdateStockQuantity(FTokenDecriptado, FAccountIDDecriptado, Sku,
-               Estoque, RespostaJSON, ErroMsg) then
+          OKEstoque := True;
+
+          if EnviarEstoque then
+
+            OKEstoque := Cliente.UpdateStockQuantity(FTokenDecriptado, FAccountIDDecriptado, Sku,
+                 Estoque, RespostaJSON, ErroMsg);
+
+          if OKEstoque then
           begin
             Inc(iSucesso);
             // Preco: enviado logo apos o estoque, como passo separado. Falha aqui
 
             // NAO desfaz o estoque nem segura a flag - ver PrepararPrecoParaEnvio.
 
-            if PrepararPrecoParaEnvio(CodProduto, Preco) then
+            if EnviarPreco and PrepararPrecoParaEnvio(CodProduto, Preco) then
             if not Cliente.UpdateSalePrice(FTokenDecriptado, FAccountIDDecriptado,
 
                  Sku, Preco, RespostaJSON, ErroMsg) then
@@ -767,20 +850,15 @@ begin
 
                 IntToStr(CodProduto) + ' falhou: ' + ErroMsg);
 
-            // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
-            // se a chamada falhar, o produto continua marcado e sera
-            // reprocessado na proxima execucao do F2.
-            // {DECISAO DO CLIENTE - 07/09/2026} o ATUALIZAR_ESTOQUE_MARKETPLACE
-            // do PRODUTOS_MARKETPLACE NAO e' mais limpo aqui. Ele deixou de ser
-            // "tem envio pendente" e passou a ser "este produto participa do
-            // sincronismo de estoque", entao fica sempre 'S'. Quem diz o que esta
-            // pendente e' o PRO.ALTERA_MARKETPLACE, que e' por loja.
-            QryAux.Close;
-            QryAux.SQL.Text :=
-              'UPDATE PRO SET ALTERA_MARKETPLACE = ''N'' WHERE COD = :COD AND LOJA = :LOJA';
-            QryAux.ParamByName('COD').AsInteger := CodProduto;
-            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-            QryAux.ExecSQL;
+            // {DECISAO DO CLIENTE - 14/10/2026} esta rotina NAO limpa mais flag
+
+            // nenhuma. O PRO.ALTERARNOECOMMERCE e' gerenciado por rotina propria do
+
+            // cliente, e o PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE por uma tela de
+
+            // produtos que eles vao criar. Enquanto as marcas ficarem ligadas, o F2
+
+            // reenvia os mesmos produtos a cada execucao - e isso e' esperado.
           end
           else
           begin
@@ -808,6 +886,7 @@ var
   CodProduto, Estoque: Integer;
   iSucesso, iFalha: Integer;
   Preco: Double;
+  EnviarEstoque, EnviarPreco, OKEstoque: Boolean;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -825,7 +904,8 @@ begin
   // aqui dentro (hoje nao renova, so usa FTokenDecriptado direto), tem
   // que gravar o NOVO refresh_token de volta em MARKETPLACE_KEY
   // imediatamente, senao a proxima renovacao invalida a sessao.
-  Log('Buscando produtos com alteracao pendente (ALTERA_MARKETPLACE = S)...');
+  Log('Buscando produtos marcados para envio (estoque: ALTERARNOECOMMERCE = T; ' +
+    'preco: ATUALIZARMARKETPLACE = S)...');
   Qry := TFDQuery.Create(nil);
   QryAux := TFDQuery.Create(nil);
   try
@@ -835,15 +915,16 @@ begin
     // so muda o metodo que efetivamente chama a API no final.
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE P.ALTERA_MARKETPLACE = ''S'' ' +
-      'AND EXISTS (SELECT 1 FROM LOJAS L ' +
+      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
         'WHERE L.CODLOJAENTREGA = 1 ' +
         'AND L.CODLOJAENTREGA = P.LOJA ' +
         'AND L.LOJA = :LOJA) ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
-        'AND PM.ATUALIZAR_ESTOQUE_MARKETPLACE = ''S'')';
+        'AND ((P.ALTERARNOECOMMERCE = ''T'' ' +
+             'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
+          'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
     Qry.Open;
     if Qry.IsEmpty then
@@ -868,7 +949,10 @@ begin
         // Busca o SKU do Magalu vinculado a esse produto fisico.
         QryAux.Close;
         QryAux.SQL.Text :=
-          'SELECT CODPRODUTONOMARKETPLACE FROM PRODUTOS_MARKETPLACE ' +
+          'SELECT CODPRODUTONOMARKETPLACE, ' +
+          'COALESCE(ESTOQUE_INFINITO, 0) AS ESTOQUE_INFINITO, ' +
+          'COALESCE(ATUALIZARMARKETPLACE, ''N'') AS ATUALIZARMARKETPLACE ' +
+          'FROM PRODUTOS_MARKETPLACE ' +
           'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
         QryAux.ParamByName('COD').AsInteger := CodProduto;
         QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
@@ -882,28 +966,66 @@ begin
         else
         begin
           Sku := QryAux.FieldByName('CODPRODUTONOMARKETPLACE').AsString;
+
+          // {DECISAO DO CLIENTE - 14/10/2026} dois gates INDEPENDENTES:
+
+          //   ESTOQUE -> PRO.ALTERARNOECOMMERCE = 'T', e NAO envia quando o
+
+          //              produto esta marcado como estoque infinito.
+
+          //   PRECO   -> PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE = 'S'.
+
+          // Um produto pode entrar na lista por um gate e nao pelo outro, por
+
+          // isso os dois sao avaliados aqui, por produto, e nao na consulta.
+
+          // {ATENCAO} nenhum dos dois campos e' limpo por esta rotina - quem
+
+          // gerencia e' o cliente, por rotina propria (PRO) e por tela (PM).
+
+          EnviarEstoque := (Trim(Qry.FieldByName('ALTERARNOECOMMERCE').AsString) = 'T') and
+
+            (QryAux.FieldByName('ESTOQUE_INFINITO').AsInteger <> 1);
+
+          EnviarPreco := QryAux.FieldByName('ATUALIZARMARKETPLACE').AsString = 'S';
           QryAux.Close;
-          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE primeiro.
-          QryAux.SQL.Text :=
-            'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
-            'DATAULTIMAALTERACAO = :DATA ' +
-            'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
-          QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
-          QryAux.ParamByName('DATA').AsDateTime := Now;
-          QryAux.ParamByName('COD').AsInteger := CodProduto;
-          QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-          QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
-          QryAux.ExecSQL;
+          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE - so quando o estoque
+
+          // vai mesmo ser enviado, senao a foto mostraria uma quantidade que o
+
+          // marketplace nunca recebeu (caso do estoque infinito).
+
+          if EnviarEstoque then
+
+          begin
+            QryAux.SQL.Text :=
+              'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
+              'DATAULTIMAALTERACAO = :DATA ' +
+              'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
+            QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
+            QryAux.ParamByName('DATA').AsDateTime := Now;
+            QryAux.ParamByName('COD').AsInteger := CodProduto;
+            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+            QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
+            QryAux.ExecSQL;
+
+          end;
           // 2) Chama a API do Magalu pra atualizar de verdade.
-          if Cliente.UpdateStock(FTokenDecriptado, FAccountIDDecriptado, Sku,
-               Estoque, ErroMsg) then
+          OKEstoque := True;
+
+          if EnviarEstoque then
+
+            OKEstoque := Cliente.UpdateStock(FTokenDecriptado, FAccountIDDecriptado, Sku,
+                 Estoque, ErroMsg);
+
+          if OKEstoque then
           begin
             Inc(iSucesso);
             // Preco: enviado logo apos o estoque, como passo separado. Falha aqui
 
             // NAO desfaz o estoque nem segura a flag - ver PrepararPrecoParaEnvio.
 
-            if PrepararPrecoParaEnvio(CodProduto, Preco) then
+            if EnviarPreco and PrepararPrecoParaEnvio(CodProduto, Preco) then
             if not Cliente.UpdatePrice(FTokenDecriptado, FAccountIDDecriptado,
 
                  Sku, Preco, ErroMsg) then
@@ -911,20 +1033,15 @@ begin
 
                 IntToStr(CodProduto) + ' falhou: ' + ErroMsg);
 
-            // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
-            // se a chamada falhar, o produto continua marcado e sera
-            // reprocessado na proxima execucao do F2.
-            // {DECISAO DO CLIENTE - 07/09/2026} o ATUALIZAR_ESTOQUE_MARKETPLACE
-            // do PRODUTOS_MARKETPLACE NAO e' mais limpo aqui. Ele deixou de ser
-            // "tem envio pendente" e passou a ser "este produto participa do
-            // sincronismo de estoque", entao fica sempre 'S'. Quem diz o que esta
-            // pendente e' o PRO.ALTERA_MARKETPLACE, que e' por loja.
-            QryAux.Close;
-            QryAux.SQL.Text :=
-              'UPDATE PRO SET ALTERA_MARKETPLACE = ''N'' WHERE COD = :COD AND LOJA = :LOJA';
-            QryAux.ParamByName('COD').AsInteger := CodProduto;
-            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-            QryAux.ExecSQL;
+            // {DECISAO DO CLIENTE - 14/10/2026} esta rotina NAO limpa mais flag
+
+            // nenhuma. O PRO.ALTERARNOECOMMERCE e' gerenciado por rotina propria do
+
+            // cliente, e o PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE por uma tela de
+
+            // produtos que eles vao criar. Enquanto as marcas ficarem ligadas, o F2
+
+            // reenvia os mesmos produtos a cada execucao - e isso e' esperado.
           end
           else
           begin
@@ -952,6 +1069,8 @@ var
   CodProduto, Estoque: Integer;
   iSucesso, iFalha: Integer;
   Preco: Double;
+  EnviarEstoque, EnviarPreco, OKEstoque: Boolean;
+  QtdML: Integer;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -971,7 +1090,8 @@ begin
   // atualizamos o estoque do ITEM inteiro - se o cliente vender produto
   // com variacao, isso precisa crescer pra mexer em variations[], igual a
   // pendencia ja anotada no EnviarEstoqueShopee.
-  Log('Buscando produtos com alteracao pendente (ALTERA_MARKETPLACE = S)...');
+  Log('Buscando produtos marcados para envio (estoque: ALTERARNOECOMMERCE = T; ' +
+    'preco: ATUALIZARMARKETPLACE = S)...');
   Qry := TFDQuery.Create(nil);
   QryAux := TFDQuery.Create(nil);
   try
@@ -981,15 +1101,16 @@ begin
     // Magalu - so muda o metodo que efetivamente chama a API no final.
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE P.ALTERA_MARKETPLACE = ''S'' ' +
-      'AND EXISTS (SELECT 1 FROM LOJAS L ' +
+      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
         'WHERE L.CODLOJAENTREGA = 1 ' +
         'AND L.CODLOJAENTREGA = P.LOJA ' +
         'AND L.LOJA = :LOJA) ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
-        'AND PM.ATUALIZAR_ESTOQUE_MARKETPLACE = ''S'')';
+        'AND ((P.ALTERARNOECOMMERCE = ''T'' ' +
+             'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
+          'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
     Qry.Open;
     if Qry.IsEmpty then
@@ -1012,7 +1133,10 @@ begin
         // produto fisico.
         QryAux.Close;
         QryAux.SQL.Text :=
-          'SELECT CODPRODUTONOMARKETPLACE FROM PRODUTOS_MARKETPLACE ' +
+          'SELECT CODPRODUTONOMARKETPLACE, ' +
+          'COALESCE(ESTOQUE_INFINITO, 0) AS ESTOQUE_INFINITO, ' +
+          'COALESCE(ATUALIZARMARKETPLACE, ''N'') AS ATUALIZARMARKETPLACE ' +
+          'FROM PRODUTOS_MARKETPLACE ' +
           'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
         QryAux.ParamByName('COD').AsInteger := CodProduto;
         QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
@@ -1026,18 +1150,50 @@ begin
         else
         begin
           ItemID := QryAux.FieldByName('CODPRODUTONOMARKETPLACE').AsString;
+
+          // {DECISAO DO CLIENTE - 14/10/2026} dois gates INDEPENDENTES:
+
+          //   ESTOQUE -> PRO.ALTERARNOECOMMERCE = 'T', e NAO envia quando o
+
+          //              produto esta marcado como estoque infinito.
+
+          //   PRECO   -> PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE = 'S'.
+
+          // Um produto pode entrar na lista por um gate e nao pelo outro, por
+
+          // isso os dois sao avaliados aqui, por produto, e nao na consulta.
+
+          // {ATENCAO} nenhum dos dois campos e' limpo por esta rotina - quem
+
+          // gerencia e' o cliente, por rotina propria (PRO) e por tela (PM).
+
+          EnviarEstoque := (Trim(Qry.FieldByName('ALTERARNOECOMMERCE').AsString) = 'T') and
+
+            (QryAux.FieldByName('ESTOQUE_INFINITO').AsInteger <> 1);
+
+          EnviarPreco := QryAux.FieldByName('ATUALIZARMARKETPLACE').AsString = 'S';
           QryAux.Close;
-          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE primeiro.
-          QryAux.SQL.Text :=
-            'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
-            'DATAULTIMAALTERACAO = :DATA ' +
-            'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
-          QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
-          QryAux.ParamByName('DATA').AsDateTime := Now;
-          QryAux.ParamByName('COD').AsInteger := CodProduto;
-          QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-          QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
-          QryAux.ExecSQL;
+          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE - so quando o estoque
+
+          // vai mesmo ser enviado, senao a foto mostraria uma quantidade que o
+
+          // marketplace nunca recebeu (caso do estoque infinito).
+
+          if EnviarEstoque then
+
+          begin
+            QryAux.SQL.Text :=
+              'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
+              'DATAULTIMAALTERACAO = :DATA ' +
+              'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
+            QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
+            QryAux.ParamByName('DATA').AsDateTime := Now;
+            QryAux.ParamByName('COD').AsInteger := CodProduto;
+            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+            QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
+            QryAux.ExecSQL;
+
+          end;
           // 2) Chama a API do Mercado Livre pra atualizar de verdade.
 
           // {ML} unico dos cinco em que estoque e preco vao na MESMA chamada - o
@@ -1046,11 +1202,27 @@ begin
 
           // preco e calculado ANTES, e nao depois como nos outros quatro.
 
-          if not PrepararPrecoParaEnvio(CodProduto, Preco) then
+          Preco := 0;
 
-            Preco := 0; // sem preco valido no cadastro: envia so o estoque
+          if EnviarPreco then
 
-          if Cliente.UpdateStockAndPrice(FTokenDecriptado, ItemID, Estoque, Preco,
+            if not PrepararPrecoParaEnvio(CodProduto, Preco) then
+
+              Preco := 0; // sem preco valido no cadastro: nao manda preco
+
+          // Quantidade negativa diz ao cliente do ML pra NAO mandar estoque -
+
+          // necessario porque aqui os dois campos vao na mesma requisicao.
+
+          if EnviarEstoque then
+
+            QtdML := Estoque
+
+          else
+
+            QtdML := -1;
+
+          if Cliente.UpdateStockAndPrice(FTokenDecriptado, ItemID, QtdML, Preco,
 
                ErroMsg) then
 
@@ -1058,20 +1230,15 @@ begin
 
             Inc(iSucesso);
 
-            // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
-            // se a chamada falhar, o produto continua marcado e sera
-            // reprocessado na proxima execucao do F2.
-            // {DECISAO DO CLIENTE - 07/09/2026} o ATUALIZAR_ESTOQUE_MARKETPLACE
-            // do PRODUTOS_MARKETPLACE NAO e' mais limpo aqui. Ele deixou de ser
-            // "tem envio pendente" e passou a ser "este produto participa do
-            // sincronismo de estoque", entao fica sempre 'S'. Quem diz o que esta
-            // pendente e' o PRO.ALTERA_MARKETPLACE, que e' por loja.
-            QryAux.Close;
-            QryAux.SQL.Text :=
-              'UPDATE PRO SET ALTERA_MARKETPLACE = ''N'' WHERE COD = :COD AND LOJA = :LOJA';
-            QryAux.ParamByName('COD').AsInteger := CodProduto;
-            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-            QryAux.ExecSQL;
+            // {DECISAO DO CLIENTE - 14/10/2026} esta rotina NAO limpa mais flag
+
+            // nenhuma. O PRO.ALTERARNOECOMMERCE e' gerenciado por rotina propria do
+
+            // cliente, e o PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE por uma tela de
+
+            // produtos que eles vao criar. Enquanto as marcas ficarem ligadas, o F2
+
+            // reenvia os mesmos produtos a cada execucao - e isso e' esperado.
           end
           else
           begin
@@ -1100,6 +1267,7 @@ var
   CodProduto, Estoque, I: Integer;
   iSucesso, iFalha: Integer;
   Preco: Double;
+  EnviarEstoque, EnviarPreco, OKEstoque: Boolean;
 begin
   if (FDevClientId = '') or (FDevClientSecret = '') then
   begin
@@ -1116,7 +1284,8 @@ begin
       'a loja novamente no SATLojas.');
     Exit;
   end;
-  Log('Buscando produtos com alteracao pendente (ALTERA_MARKETPLACE = S)...');
+  Log('Buscando produtos marcados para envio (estoque: ALTERARNOECOMMERCE = T; ' +
+    'preco: ATUALIZARMARKETPLACE = S)...');
   Qry := TFDQuery.Create(nil);
   QryAux := TFDQuery.Create(nil);
   try
@@ -1125,15 +1294,16 @@ begin
     // (conectada ao marketplace) usada pelos outros quatro.
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE P.ALTERA_MARKETPLACE = ''S'' ' +
-      'AND EXISTS (SELECT 1 FROM LOJAS L ' +
+      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
         'WHERE L.CODLOJAENTREGA = 1 ' +
         'AND (P.LOJA = L.LOJA OR P.LOJA = L.CODLOJAENTREGA)' +
         'AND L.LOJA = :LOJA) ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
-        'AND PM.ATUALIZAR_ESTOQUE_MARKETPLACE = ''S'')';
+        'AND ((P.ALTERARNOECOMMERCE = ''T'' ' +
+             'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
+          'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
     Qry.Open;
     if Qry.IsEmpty then
@@ -1186,7 +1356,10 @@ begin
         // Busca a chave "product_id|sku_id" vinculada a esse produto fisico.
         QryAux.Close;
         QryAux.SQL.Text :=
-          'SELECT CODPRODUTONOMARKETPLACE FROM PRODUTOS_MARKETPLACE ' +
+          'SELECT CODPRODUTONOMARKETPLACE, ' +
+          'COALESCE(ESTOQUE_INFINITO, 0) AS ESTOQUE_INFINITO, ' +
+          'COALESCE(ATUALIZARMARKETPLACE, ''N'') AS ATUALIZARMARKETPLACE ' +
+          'FROM PRODUTOS_MARKETPLACE ' +
           'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
         QryAux.ParamByName('COD').AsInteger := CodProduto;
         QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
@@ -1200,29 +1373,67 @@ begin
         else
         begin
           ChaveTikTok := QryAux.FieldByName('CODPRODUTONOMARKETPLACE').AsString;
+
+          // {DECISAO DO CLIENTE - 14/10/2026} dois gates INDEPENDENTES:
+
+          //   ESTOQUE -> PRO.ALTERARNOECOMMERCE = 'T', e NAO envia quando o
+
+          //              produto esta marcado como estoque infinito.
+
+          //   PRECO   -> PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE = 'S'.
+
+          // Um produto pode entrar na lista por um gate e nao pelo outro, por
+
+          // isso os dois sao avaliados aqui, por produto, e nao na consulta.
+
+          // {ATENCAO} nenhum dos dois campos e' limpo por esta rotina - quem
+
+          // gerencia e' o cliente, por rotina propria (PRO) e por tela (PM).
+
+          EnviarEstoque := (Trim(Qry.FieldByName('ALTERARNOECOMMERCE').AsString) = 'T') and
+
+            (QryAux.FieldByName('ESTOQUE_INFINITO').AsInteger <> 1);
+
+          EnviarPreco := QryAux.FieldByName('ATUALIZARMARKETPLACE').AsString = 'S';
           SepararProdutoESkuTikTok(ChaveTikTok, ProductId, SkuId);
           QryAux.Close;
-          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE primeiro.
-          QryAux.SQL.Text :=
-            'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
-            'DATAULTIMAALTERACAO = :DATA ' +
-            'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
-          QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
-          QryAux.ParamByName('DATA').AsDateTime := Now;
-          QryAux.ParamByName('COD').AsInteger := CodProduto;
-          QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-          QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
-          QryAux.ExecSQL;
+          // 1) Atualiza a "foto" na PRODUTOS_MARKETPLACE - so quando o estoque
+
+          // vai mesmo ser enviado, senao a foto mostraria uma quantidade que o
+
+          // marketplace nunca recebeu (caso do estoque infinito).
+
+          if EnviarEstoque then
+
+          begin
+            QryAux.SQL.Text :=
+              'UPDATE PRODUTOS_MARKETPLACE SET ESTOQUE = :ESTOQUE, ' +
+              'DATAULTIMAALTERACAO = :DATA ' +
+              'WHERE CODPRODUTO = :COD AND LOJA = :LOJA AND CODMARKETPLACE = :MKT';
+            QryAux.ParamByName('ESTOQUE').AsInteger := Estoque;
+            QryAux.ParamByName('DATA').AsDateTime := Now;
+            QryAux.ParamByName('COD').AsInteger := CodProduto;
+            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+            QryAux.ParamByName('MKT').AsInteger := FCodMarketplace;
+            QryAux.ExecSQL;
+
+          end;
           // 2) Chama a API do TikTok pra atualizar de verdade.
-          if Cliente.UpdateInventory(FTokenDecriptado, ShopCipher, ProductId, SkuId,
-               WarehouseId, Estoque, ErroMsg) then
+          OKEstoque := True;
+
+          if EnviarEstoque then
+
+            OKEstoque := Cliente.UpdateInventory(FTokenDecriptado, ShopCipher, ProductId, SkuId,
+                 WarehouseId, Estoque, ErroMsg);
+
+          if OKEstoque then
           begin
             Inc(iSucesso);
             // Preco: enviado logo apos o estoque, como passo separado. Falha aqui
 
             // NAO desfaz o estoque nem segura a flag - ver PrepararPrecoParaEnvio.
 
-            if PrepararPrecoParaEnvio(CodProduto, Preco) then
+            if EnviarPreco and PrepararPrecoParaEnvio(CodProduto, Preco) then
             if not Cliente.UpdatePrice(FTokenDecriptado, ShopCipher, ProductId,
 
                  SkuId, Preco, ErroMsg) then
@@ -1230,20 +1441,15 @@ begin
 
                 IntToStr(CodProduto) + ' falhou: ' + ErroMsg);
 
-            // 3) So' limpa a flag do PRO depois de confirmado o envio - assim,
-            // se a chamada falhar, o produto continua marcado e sera
-            // reprocessado na proxima execucao do F2.
-            // {DECISAO DO CLIENTE - 07/09/2026} o ATUALIZAR_ESTOQUE_MARKETPLACE
-            // do PRODUTOS_MARKETPLACE NAO e' mais limpo aqui. Ele deixou de ser
-            // "tem envio pendente" e passou a ser "este produto participa do
-            // sincronismo de estoque", entao fica sempre 'S'. Quem diz o que esta
-            // pendente e' o PRO.ALTERA_MARKETPLACE, que e' por loja.
-            QryAux.Close;
-            QryAux.SQL.Text :=
-              'UPDATE PRO SET ALTERA_MARKETPLACE = ''N'' WHERE COD = :COD AND LOJA = :LOJA';
-            QryAux.ParamByName('COD').AsInteger := CodProduto;
-            QryAux.ParamByName('LOJA').AsInteger := FLojaSelecionada;
-            QryAux.ExecSQL;
+            // {DECISAO DO CLIENTE - 14/10/2026} esta rotina NAO limpa mais flag
+
+            // nenhuma. O PRO.ALTERARNOECOMMERCE e' gerenciado por rotina propria do
+
+            // cliente, e o PRODUTOS_MARKETPLACE.ATUALIZARMARKETPLACE por uma tela de
+
+            // produtos que eles vao criar. Enquanto as marcas ficarem ligadas, o F2
+
+            // reenvia os mesmos produtos a cada execucao - e isso e' esperado.
           end
           else
           begin
