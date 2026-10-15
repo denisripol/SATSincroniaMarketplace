@@ -708,15 +708,22 @@ var
 begin
   Result := False;
   AErrorMessage := '';
-  OQue := 'atualizar estoque';
+  OQue := 'atualizar';
   BodyJSON := TJSONObject.Create;
   try
-    BodyJSON.AddPair('available_quantity', TJSONNumber.Create(AQuantity));
+    // {ATENCAO} AQuantity NEGATIVO significa "nao mexer no estoque" - o F2 usa
+    // isso quando o produto esta marcado so' pra preco, ou tem estoque infinito.
+    // Zero e' quantidade valida (produto esgotado), por isso o sentinela e' < 0.
+    if AQuantity >= 0 then
+    begin
+      BodyJSON.AddPair('available_quantity', TJSONNumber.Create(AQuantity));
+      OQue := 'atualizar estoque';
+    end;
     if ANovoPreco > 0 then
     begin
       // Numero mesmo, nao string - o ML recusa preco entre aspas.
       BodyJSON.AddPair('price', TJSONNumber.Create(ANovoPreco));
-      OQue := 'atualizar estoque e preco';
+      if OQue = 'atualizar estoque' then OQue := 'atualizar estoque e preco' else OQue := 'atualizar preco';
     end;
     BodyStr := BodyJSON.ToJSON;
   finally

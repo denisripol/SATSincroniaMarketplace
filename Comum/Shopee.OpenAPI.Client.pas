@@ -1144,132 +1144,170 @@ function TShopeeOpenAPIClient.GetItemList(const AAccessToken: string; AShopID: I
 const
   PATH_LIST = '/api/v2/product/get_item_list';
   PATH_INFO = '/api/v2/product/get_item_base_info';
+  // Tetos da propria Shopee: 50 itens por pagina na listagem e 50 ids por
+  // chamada no get_item_base_info. Pedir mais devolve erro.
+  PAGE_SIZE = 50;
+  INFO_LOTE = 50;
+  // Trava contra laco infinito (has_next_page que nunca zera). 200 x 50 =
+  // 10.000 anuncios, muito acima do caso real.
+  MAX_PAGINAS = 200;
 var
   StatusCode: Integer;
-  ResponseStr: string;
+  ResponseStr, QueryBase, QueryExtra, IDList: string;
   JSONValue, JSONResp: TJSONValue;
   JSONObj, RespObj, ResponseDataObj: TJSONObject;
   ItemArr: TJSONArray;
-  I: Integer;
-  IDList: string;
-  ItemIDs: TArray<Int64>;
-  QueryExtra: string;
+  I, J, Offset, Pagina, Base: Integer;
+  TodosIDs: TArray<Int64>;
+  TemProxima: Boolean;
 begin
   Result := False;
   SetLength(AItems, 0);
+  SetLength(TodosIDs, 0);
   AErrorMessage := '';
-  // 1) Lista os item_id da loja. Se AItemStatusFilter vier vazio (uso
-  // padrao, compativel com chamadas antigas), usa os 4 status que cobrem
-  // "todos os produtos cadastrados" (igual as abas Ativo/Violacao/Sob
-  // Analise/Nao publicado do painel da Shopee): NORMAL (Ativo), BANNED
-  // (Violacao), REVIEWING (Sob analise) e UNLIST (Nao publicado).
-  // SELLER_DELETE/SHOPEE_DELETE (itens excluidos) ficam de fora de
-  // proposito. Se vier preenchido, filtra so pelo(s) status pedido(s).
-  // AUpdateTimeFrom/AUpdateTimeTo (Unix timestamp, 0 = sem filtro) permitem
-  // restringir por data de ULTIMA ATUALIZACAO do item (a Shopee nao
-  // oferece filtro por data de CRIACAO nessa API).
-  QueryExtra := 'offset=0&page_size=50';
+  // Filtros fixos da consulta, sem offset/page_size (esses mudam a cada pagina).
+  // Se AItemStatusFilter vier vazio (uso padrao), usa os 4 status que cobrem
+  // "todos os produtos cadastrados" (igual as abas Ativo/Violacao/Sob Analise/
+  // Nao publicado do painel da Shopee): NORMAL, BANNED, REVIEWING e UNLIST.
+  // SELLER_DELETE/SHOPEE_DELETE (itens excluidos) ficam de fora de proposito.
+  QueryBase := '';
   if AItemStatusFilter <> '' then
-    QueryExtra := QueryExtra + '&item_status=' + AItemStatusFilter
+    QueryBase := QueryBase + '&item_status=' + AItemStatusFilter
   else
-    QueryExtra := QueryExtra +
+    QueryBase := QueryBase +
       '&item_status=NORMAL&item_status=BANNED&item_status=REVIEWING&item_status=UNLIST';
+  // {ATENCAO} update_time aqui e' a data da ULTIMA EDICAO DO ANUNCIO. Alterar
+  // ESTOQUE ou PRECO por API NAO mexe nesse campo - confirmado em 14/10/2026:
+  // um anuncio editado pela ultima vez em 31/07 continuou com update_time de
+  // 31/07 depois de o F2 mudar estoque e preco no mesmo dia. Janela curta
+  // demais aqui esconde produto ativo e em uso, sem erro nenhum.
+  // A Shopee NAO limita o tamanho dessa janela (testado com 286 dias) -
+  // diferente da busca de PEDIDOS, que trava em 15 dias.
   if AUpdateTimeFrom > 0 then
-    QueryExtra := QueryExtra + '&update_time_from=' + IntToStr(AUpdateTimeFrom);
+    QueryBase := QueryBase + '&update_time_from=' + IntToStr(AUpdateTimeFrom);
   if AUpdateTimeTo > 0 then
-    QueryExtra := QueryExtra + '&update_time_to=' + IntToStr(AUpdateTimeTo);
-  ResponseStr := ExecuteGet(PATH_LIST, QueryExtra, AAccessToken, AShopID, StatusCode);
-  if StatusCode >= 400 then
+    QueryBase := QueryBase + '&update_time_to=' + IntToStr(AUpdateTimeTo);
+  // 1) Lista os item_id da loja, pagina a pagina.
+  Offset := 0;
+  Pagina := 0;
+  TemProxima := False;
+  repeat
+    Inc(Pagina);
+    QueryExtra := 'offset=' + IntToStr(Offset) + '&page_size=' +
+      IntToStr(PAGE_SIZE) + QueryBase;
+    ResponseStr := ExecuteGet(PATH_LIST, QueryExtra, AAccessToken, AShopID, StatusCode);
+    // {DIAGNOSTICO} resposta crua sempre no log - o ExecuteGet so registra
+    // quando o HTTP e' 400 ou mais, e a Shopee responde 200 com lista vazia
+    // tanto quando a loja nao tem item quanto quando o filtro nao casa. Sem
+    // isso, "0 produtos" nao diz qual dos dois aconteceu.
+    DoLog(Format('GetItemList pagina %d [%s]: HTTP %d %s',
+      [Pagina, QueryExtra, StatusCode, ResponseStr]));
+    if StatusCode >= 400 then
+    begin
+      AErrorMessage := Format('HTTP %d ao listar itens: %s', [StatusCode, ResponseStr]);
+      DoLog(AErrorMessage);
+      Exit;
+    end;
+    TemProxima := False;
+    JSONValue := TJSONObject.ParseJSONValue(ResponseStr);
+    try
+      if not (JSONValue is TJSONObject) then
+      begin
+        AErrorMessage := 'Resposta inesperada ao listar itens (nao e JSON)';
+        Exit;
+      end;
+      JSONObj := TJSONObject(JSONValue);
+      if Assigned(JSONObj.GetValue('error')) and
+         (JSONObj.GetValue<string>('error') <> '') then
+      begin
+        AErrorMessage := JSONObj.GetValue<string>('error');
+        if Assigned(JSONObj.GetValue('message')) then
+          AErrorMessage := AErrorMessage + ': ' + JSONObj.GetValue<string>('message');
+        DoLog('Erro ao listar itens: ' + AErrorMessage);
+        Exit;
+      end;
+      // O array "item" vem dentro do objeto aninhado "response", nao na raiz.
+      if not JSONObj.TryGetValue<TJSONObject>('response', RespObj) or
+         not RespObj.TryGetValue<TJSONArray>('item', ItemArr) then
+        Break; // sem itens nessa pagina - nao e' erro, so' acabou
+      // Acrescenta ao que ja veio das paginas anteriores.
+      Base := Length(TodosIDs);
+      SetLength(TodosIDs, Base + ItemArr.Count);
+      for I := 0 to ItemArr.Count - 1 do
+        TodosIDs[Base + I] := ItemArr.Items[I].GetValue<Int64>('item_id');
+      RespObj.TryGetValue<Boolean>('has_next_page', TemProxima);
+    finally
+      JSONValue.Free;
+    end;
+    Offset := Offset + PAGE_SIZE;
+  until (not TemProxima) or (Pagina >= MAX_PAGINAS);
+  if TemProxima and (Pagina >= MAX_PAGINAS) then
+    DoLog(Format('Aviso: limite de %d paginas atingido - podem existir mais ' +
+      'anuncios nao listados.', [MAX_PAGINAS]));
+  if Length(TodosIDs) = 0 then
   begin
-    AErrorMessage := Format('HTTP %d ao listar itens: %s', [StatusCode, ResponseStr]);
-    DoLog(AErrorMessage);
+    Result := True;
     Exit;
   end;
-  JSONValue := TJSONObject.ParseJSONValue(ResponseStr);
-  try
-    if not (JSONValue is TJSONObject) then
-    begin
-      AErrorMessage := 'Resposta inesperada ao listar itens (não é JSON)';
-      Exit;
-    end;
-    JSONObj := TJSONObject(JSONValue);
-    if Assigned(JSONObj.GetValue('error')) and
-       (JSONObj.GetValue<string>('error') <> '') then
-    begin
-      AErrorMessage := JSONObj.GetValue<string>('error');
-      if Assigned(JSONObj.GetValue('message')) then
-        AErrorMessage := AErrorMessage + ': ' + JSONObj.GetValue<string>('message');
-      DoLog('Erro ao listar itens: ' + AErrorMessage);
-      Exit;
-    end;
-    // O array "item" vem dentro do objeto aninhado "response", não na raiz
-    // do JSON - por isso a listagem sempre vinha vazia mesmo com itens reais
-    // na loja (confirmado via log: response.item continha o item, mas
-    // procurávamos "item" direto na raiz).
-    if not JSONObj.TryGetValue<TJSONObject>('response', RespObj) or
-       not RespObj.TryGetValue<TJSONArray>('item', ItemArr) then
-    begin
-      // loja sem itens cadastrados - não é erro, só não tem o que mostrar
-      Result := True;
-      Exit;
-    end;
-    SetLength(ItemIDs, ItemArr.Count);
+  DoLog(Format('%d anuncio(s) listado(s) em %d pagina(s) - buscando detalhes.',
+    [Length(TodosIDs), Pagina]));
+  // 2) Traz nome/preco/estoque desses itens, em lotes de 50 (teto da Shopee).
+  I := 0;
+  while I < Length(TodosIDs) do
+  begin
     IDList := '';
-    for I := 0 to ItemArr.Count - 1 do
+    J := I;
+    while (J < Length(TodosIDs)) and (J - I < INFO_LOTE) do
     begin
-      ItemIDs[I] := ItemArr.Items[I].GetValue<Int64>('item_id');
       if IDList <> '' then
         IDList := IDList + ',';
-      IDList := IDList + IntToStr(ItemIDs[I]);
+      IDList := IDList + IntToStr(TodosIDs[J]);
+      Inc(J);
     end;
-  finally
-    JSONValue.Free;
-  end;
-  if IDList = '' then
-  begin
-    Result := True;
-    Exit;
-  end;
-  // 2) Traz nome/preço/estoque desses itens
-  ResponseStr := ExecuteGet(PATH_INFO, 'item_id_list=' + IDList,
-    AAccessToken, AShopID, StatusCode);
-  if StatusCode >= 400 then
-  begin
-    AErrorMessage := Format('HTTP %d ao obter detalhes dos itens: %s', [StatusCode, ResponseStr]);
-    DoLog(AErrorMessage);
-    Exit;
-  end;
-  JSONResp := TJSONObject.ParseJSONValue(ResponseStr);
-  try
-    if not (JSONResp is TJSONObject) then
+    ResponseStr := ExecuteGet(PATH_INFO, 'item_id_list=' + IDList,
+      AAccessToken, AShopID, StatusCode);
+    if StatusCode >= 400 then
     begin
-      AErrorMessage := 'Resposta inesperada ao obter detalhes (não é JSON)';
+      AErrorMessage := Format('HTTP %d ao obter detalhes dos itens: %s',
+        [StatusCode, ResponseStr]);
+      DoLog(AErrorMessage);
+      SetLength(AItems, 0);
       Exit;
     end;
-    RespObj := TJSONObject(JSONResp);
-    if Assigned(RespObj.GetValue('error')) and
-       (RespObj.GetValue<string>('error') <> '') then
-    begin
-      AErrorMessage := RespObj.GetValue<string>('error');
-      if Assigned(RespObj.GetValue('message')) then
-        AErrorMessage := AErrorMessage + ': ' + RespObj.GetValue<string>('message');
-      DoLog('Erro ao obter detalhes dos itens: ' + AErrorMessage);
-      Exit;
+    JSONResp := TJSONObject.ParseJSONValue(ResponseStr);
+    try
+      if not (JSONResp is TJSONObject) then
+      begin
+        AErrorMessage := 'Resposta inesperada ao obter detalhes (nao e JSON)';
+        SetLength(AItems, 0);
+        Exit;
+      end;
+      RespObj := TJSONObject(JSONResp);
+      if Assigned(RespObj.GetValue('error')) and
+         (RespObj.GetValue<string>('error') <> '') then
+      begin
+        AErrorMessage := RespObj.GetValue<string>('error');
+        if Assigned(RespObj.GetValue('message')) then
+          AErrorMessage := AErrorMessage + ': ' + RespObj.GetValue<string>('message');
+        DoLog('Erro ao obter detalhes dos itens: ' + AErrorMessage);
+        SetLength(AItems, 0);
+        Exit;
+      end;
+      // Mesmo caso do passo 1: "item_list" vem dentro de "response".
+      if RespObj.TryGetValue<TJSONObject>('response', ResponseDataObj) and
+         ResponseDataObj.TryGetValue<TJSONArray>('item_list', ItemArr) then
+      begin
+        Base := Length(AItems);
+        SetLength(AItems, Base + ItemArr.Count);
+        for J := 0 to ItemArr.Count - 1 do
+          ParseItemJSON(ItemArr.Items[J] as TJSONObject, AItems[Base + J]);
+      end;
+    finally
+      JSONResp.Free;
     end;
-    // Mesmo caso do passo 1: "item_list" vem dentro de "response", não na raiz.
-    if not RespObj.TryGetValue<TJSONObject>('response', ResponseDataObj) or
-       not ResponseDataObj.TryGetValue<TJSONArray>('item_list', ItemArr) then
-    begin
-      Result := True;
-      Exit;
-    end;
-    SetLength(AItems, ItemArr.Count);
-    for I := 0 to ItemArr.Count - 1 do
-      ParseItemJSON(ItemArr.Items[I] as TJSONObject, AItems[I]);
-    Result := True;
-  finally
-    JSONResp.Free;
+    Inc(I, INFO_LOTE);
   end;
+  Result := True;
 end;
 function TShopeeOpenAPIClient.UpdatePrice(const AAccessToken: string;
   AShopID, AItemID, AModelID: Int64; ANewPrice: Double;

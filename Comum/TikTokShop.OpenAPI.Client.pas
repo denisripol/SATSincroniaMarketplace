@@ -2340,7 +2340,17 @@ begin
               SkuObj.TryGetValue<string>('seller_sku', AProdutos[Total].Skus[J].SellerSku);
               if SkuObj.TryGetValue<TJSONObject>('price', PrecoObj) then
               begin
-                if PrecoObj.TryGetValue<string>('sale_price', Valor) then
+                // {ATENCAO} o TikTok nao usa um campo so' pra preco, e nem sempre
+                // manda os tres. Visto em 14/10/2026, sandbox e producao: veio
+                // apenas "tax_exclusive_price", sem "sale_price" nenhum - e como o
+                // codigo so' lia sale_price, a tela mostrava 0,00 pra todo produto.
+                // Le na ordem do mais especifico pro mais generico. Valor vem como
+                // STRING, igual todo monetario deles.
+                Valor := '';
+                if not PrecoObj.TryGetValue<string>('sale_price', Valor) then
+                  if not PrecoObj.TryGetValue<string>('tax_inclusive_price', Valor) then
+                    PrecoObj.TryGetValue<string>('tax_exclusive_price', Valor);
+                if Valor <> '' then
                   AProdutos[Total].Skus[J].Preco :=
                     StrToFloatDef(Valor, 0, TFormatSettings.Invariant);
                 PrecoObj.TryGetValue<string>('currency', AProdutos[Total].Skus[J].Currency);
