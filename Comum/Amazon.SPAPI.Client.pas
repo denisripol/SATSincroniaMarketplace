@@ -126,6 +126,8 @@ type
     Price: Double;
     Currency: string;
     Stock: Integer;
+    // summaries[0].lastUpdatedDate, em hora local. 0 = a Amazon nao mandou.
+    LastUpdated: TDateTime;
   end;
   TAmazonListingItemArray = TArray<TAmazonListingItem>;
 
@@ -1361,6 +1363,8 @@ const
   MAX_PAGINAS = 500;
 var
   ApiPath, QueryBase, Query, ResponseJSON, NextToken, TokenAnterior: string;
+  DataTxt: string;
+  DataAlt: TDateTime;
   StatusCode, Pagina, Base, I: Integer;
   JSONValue: TJSONValue;
   JSONObj, ItemObj, SummaryObj, PriceObj, FulfillObj, PagObj: TJSONObject;
@@ -1432,6 +1436,7 @@ begin
         AItems[Base + I].Price := 0;
         AItems[Base + I].Currency := '';
         AItems[Base + I].Stock := 0;
+        AItems[Base + I].LastUpdated := 0;
         // {ATENCAO} SummariesArr zerado a cada volta de proposito: o
         // TryGetValue nao limpa a variavel quando falha, e como ela e' local
         // da funcao (nao do laco), um item sem "summaries" herdaria nome,
@@ -1450,6 +1455,12 @@ begin
              (TJSONArray(SummaryObj.GetValue('status')).Count > 0) then
             AItems[Base + I].Status :=
               TJSONArray(SummaryObj.GetValue('status')).Items[0].Value;
+          // Data da ultima alteracao do anuncio, ISO 8601 em UTC
+          // (ex: 2026-10-14T18:22:05.123Z) - convertida para hora local.
+          DataTxt := '';
+          if SummaryObj.TryGetValue<string>('lastUpdatedDate', DataTxt) and
+             TryISO8601ToDate(DataTxt, DataAlt, False) then
+            AItems[Base + I].LastUpdated := DataAlt;
         end;
         if ItemObj.TryGetValue<TJSONArray>('offers', OffersArr) and
            (OffersArr.Count > 0) then

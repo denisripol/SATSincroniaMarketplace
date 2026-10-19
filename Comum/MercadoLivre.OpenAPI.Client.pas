@@ -76,6 +76,7 @@ type
     SoldQuantity: Integer;
     Status: string;      // active, paused, closed, under_review
     Permalink: string;   // URL publica do anuncio
+    LastUpdated: TDateTime; // last_updated, em hora local. 0 = nao veio
   end;
   TMercadoLivreItemArray = TArray<TMercadoLivreItem>;
 
@@ -1239,6 +1240,8 @@ var
   Wrapper, ItemBody: TJSONObject;
   I: Integer;
   Codigo: Integer;
+  DataTxt: string;
+  DataAlt: TDateTime;
 begin
   Result := False;
   AErrorMessage := '';
@@ -1296,6 +1299,12 @@ begin
       ItemBody.TryGetValue<Integer>('sold_quantity', AItems[I].SoldQuantity);
       ItemBody.TryGetValue<string>('status', AItems[I].Status);
       ItemBody.TryGetValue<string>('permalink', AItems[I].Permalink);
+      // Ultima alteracao do anuncio, ISO 8601 em UTC
+      // (ex: 2026-10-14T18:22:05.000Z) - convertida para hora local.
+      DataTxt := '';
+      if ItemBody.TryGetValue<string>('last_updated', DataTxt) and
+         TryISO8601ToDate(DataTxt, DataAlt, False) then
+        AItems[I].LastUpdated := DataAlt;
     end;
 
     Result := True;

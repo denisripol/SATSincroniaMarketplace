@@ -214,6 +214,7 @@ type
     Title: string;
     Status: string;          // ACTIVATE, DRAFT, SELLER_DEACTIVATED, ...
     Skus: TTikTokShopSkuArray;
+    UpdateTime: TDateTime;   // update_time do produto, em hora local. 0 = nao veio
   end;
   TTikTokShopProductArray = TArray<TTikTokShopProduct>;
 
@@ -2272,6 +2273,7 @@ var
   Raiz: TJSONValue;
   DataObj, ProdObj, SkuObj, PrecoObj, InvObj: TJSONObject;
   Arr, SkusArr, InvArr: TJSONArray;
+  UpdateUnix: Int64;
 begin
   Result := False;
   AErrorMessage := '';
@@ -2327,6 +2329,11 @@ begin
           ProdObj.TryGetValue<string>('id', AProdutos[Total].ProductId);
           ProdObj.TryGetValue<string>('title', AProdutos[Total].Title);
           ProdObj.TryGetValue<string>('status', AProdutos[Total].Status);
+          // Ultima alteracao do produto, em segundos Unix (UTC) -> hora local.
+          UpdateUnix := 0;
+          if ProdObj.TryGetValue<Int64>('update_time', UpdateUnix) and
+             (UpdateUnix > 0) then
+            AProdutos[Total].UpdateTime := UnixToDateTime(UpdateUnix, False);
 
           if ProdObj.TryGetValue<TJSONArray>('skus', SkusArr) then
           begin

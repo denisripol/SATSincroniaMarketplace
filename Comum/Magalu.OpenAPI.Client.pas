@@ -143,6 +143,9 @@ type
     Price: Double;
     Stock: Integer;
     Status: string;
+    // Data da ultima alteracao do SKU, em hora local. 0 = nao veio.
+    // {NAO CONFIRMADO} nome do campo ainda nao visto numa resposta real.
+    LastUpdated: TDateTime;
   end;
   TMagaluOfferArray = TArray<TMagaluOffer>;
 
@@ -964,6 +967,8 @@ var
   I: Integer;
   PriceObj: TJSONObject;
   PriceVal: Double;
+  DataTxt: string;
+  DataAlt: TDateTime;
 begin
   Result := False;
   AErrorMessage := '';
@@ -1014,6 +1019,16 @@ begin
           Item.TryGetValue<string>('title', AOffers[I].Description);
 
       Item.TryGetValue<string>('status', AOffers[I].Status);
+
+      // {NAO CONFIRMADO} Ultima alteracao do SKU. Ainda nao vimos uma
+      // resposta real do Magalu, entao tenta os nomes usuais (ISO 8601).
+      // Se nenhum vier, a coluna fica em branco - nao e' erro.
+      DataTxt := '';
+      if (Item.TryGetValue<string>('updated_at', DataTxt) or
+          Item.TryGetValue<string>('updatedAt', DataTxt) or
+          Item.TryGetValue<string>('last_update', DataTxt)) and
+         TryISO8601ToDate(DataTxt, DataAlt, False) then
+        AOffers[I].LastUpdated := DataAlt;
 
       // Preco - tenta campo direto (salePrice/listPrice/price) ou dentro
       // de um sub-objeto "price"/"prices" (padrao comum em APIs de
