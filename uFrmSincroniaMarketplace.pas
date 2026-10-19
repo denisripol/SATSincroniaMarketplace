@@ -93,6 +93,9 @@ type
     // Qual dos quatro precos do produto (PVend..PVend4) esta loja usa. Vai como
     // string porque e'' isso que o Funcoes.BuscarPrecoDeVenda espera.
     FPrecoPadraoLoja: string;
+    // LOJAS.CODLOJAENTREGA da loja conectada - o F2 le o estoque (PRO.QUANT)
+    // dessa loja. 0 = nao cadastrada, e o F2 nao envia nada.
+    FCodLojaEntrega: Integer;
     FAccountIDDecriptado: string;
     // Credenciais de desenvolvedor da loja (agora vem do banco, nao mais de
     // .ini) - lidas em AtualizarStatusConexao, ja escolhendo o par certo
@@ -339,6 +342,7 @@ var
   NomeMkt: string;
 begin
   FCodMarketplace := 0;
+  FCodLojaEntrega := 0;
   if FLojaSelecionada = 0 then
     Exit; // nada selecionado ainda - lblLojaConectada ja foi ajustado por quem chamou
   Qry := TFDQuery.Create(nil);
@@ -347,7 +351,7 @@ begin
     Qry.SQL.Text :=
       'SELECT LOJAD, MARKETPLACE_COD, MARKETPLACE_CLIENTID, MARKETPLACE_TOKEN, ' +
       'MARKETPLACE_KEY, MARKETPLACE_SANDBOX, MARKETPLACE_USUARIO, MARKETPLACE_SENHA, ' +
-      'MARKETPLACE_BD, PRECODEVENDAPADRAO, ' +
+      'MARKETPLACE_BD, PRECODEVENDAPADRAO, CODLOJAENTREGA, ' +
       'MARKETPLACE_APP_DEV_ID, MARKETPLACE_APP_DEV_ID_SANDBOX ' +
       'FROM LOJAS WHERE LOJA = :LOJA';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
@@ -370,6 +374,7 @@ begin
     FPrecoPadraoLoja := Trim(Qry.FieldByName('PRECODEVENDAPADRAO').AsString);
     if StrToIntDef(FPrecoPadraoLoja, 0) = 0 then
       FPrecoPadraoLoja := '1';
+    FCodLojaEntrega := Qry.FieldByName('CODLOJAENTREGA').AsInteger;
     // Credenciais de desenvolvedor - a pedido do cliente, agora usam os
     // campos ja existentes MARKETPLACE_USUARIO/MARKETPLACE_SENHA (mesmos
     // campos usados por outros tipos de e-commerce como VTex/Bagy/Tray) em
@@ -414,6 +419,18 @@ begin
       sLineBreak +
       'Conecte uma loja no SATLojas (Cadastro de Lojas, aba Marketplaces) ' +
       'antes de enviar dados.');
+    Exit;
+  end;
+  // Sem loja de entrega nao ha de onde tirar o estoque. Usar a propria loja
+  // conectada no lugar poderia zerar o estoque no marketplace, entao para.
+  if FCodLojaEntrega = 0 then
+  begin
+    Log('Loja ' + IntToStr(FLojaSelecionada) + ' sem loja de entrega ' +
+      '(LOJAS.CODLOJAENTREGA) - nada enviado.');
+    ShowMessage('A loja conectada nao tem Loja de Entrega cadastrada.' +
+      sLineBreak + sLineBreak +
+      'O estoque enviado ao marketplace sai da loja de entrega. Cadastre-a ' +
+      'no Cadastro de Lojas e tente novamente.');
     Exit;
   end;
   // Token pode ter vencido desde a ultima operacao - renova e regrava antes
@@ -547,19 +564,14 @@ begin
   QryAux := TFDQuery.Create(nil);
   try
     Qry.Connection := DZ.ZDatabase;
-    // P.LOJA aqui e' sempre a loja FISICA de entrega (sempre 1, regra de
-    // negocio confirmada) - achada via LOJAS.CODLOJAENTREGA. O parametro
-    // :LOJA (FLojaSelecionada) e' a loja CONECTADA ao marketplace (mesmo
-    // valor usado em todo o resto do sistema - Ofertas, Vincular Produto,
-    // etc.), tanto pra achar qual LOJAS.CODIGO aponta pra essa loja fisica,
-    // quanto pra filtrar PRODUTOS_MARKETPLACE.LOJA (que sempre guarda a
-    // loja conectada, nunca a fisica).
+    // {DECISAO DO CLIENTE - 19/10/2026} o estoque SEMPRE sai da loja de
+    // entrega: :LOJAENTREGA = LOJAS.CODLOJAENTREGA da loja conectada (lido em
+    // AtualizarStatusConexao), e o PRO e' filtrado direto por ela. O :LOJA
+    // (FLojaSelecionada) continua sendo a loja CONECTADA ao marketplace, que
+    // e' a que PRODUTOS_MARKETPLACE.LOJA guarda (Ofertas, Vincular Produto).
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
-        'WHERE L.CODLOJAENTREGA = 1 ' +
-        'AND L.CODLOJAENTREGA = P.LOJA ' +
-        'AND L.LOJA = :LOJA) ' +
+      'WHERE P.LOJA = :LOJAENTREGA ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
@@ -567,6 +579,7 @@ begin
              'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
           'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+    Qry.ParamByName('LOJAENTREGA').AsInteger := FCodLojaEntrega;
     Qry.Open;
     if Qry.IsEmpty then
     begin
@@ -728,15 +741,12 @@ begin
   QryAux := TFDQuery.Create(nil);
   try
     Qry.Connection := DZ.ZDatabase;
-    // Mesma consulta/mesma logica de P.LOJA (fisica, sempre 1) x :LOJA
+    // Mesma consulta/mesma logica de :LOJAENTREGA (estoque) x :LOJA
     // (conectada ao marketplace) ja usada em EnviarEstoqueShopee - so
     // muda o metodo que efetivamente chama a API no final.
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
-        'WHERE L.CODLOJAENTREGA = 1 ' +
-        'AND L.CODLOJAENTREGA = P.LOJA ' +
-        'AND L.LOJA = :LOJA) ' +
+      'WHERE P.LOJA = :LOJAENTREGA ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
@@ -744,6 +754,7 @@ begin
              'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
           'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+    Qry.ParamByName('LOJAENTREGA').AsInteger := FCodLojaEntrega;
     Qry.Open;
     if Qry.IsEmpty then
     begin
@@ -910,15 +921,12 @@ begin
   QryAux := TFDQuery.Create(nil);
   try
     Qry.Connection := DZ.ZDatabase;
-    // Mesma consulta/mesma logica de P.LOJA (fisica, sempre 1) x :LOJA
+    // Mesma consulta/mesma logica de :LOJAENTREGA (estoque) x :LOJA
     // (conectada ao marketplace) ja usada em EnviarEstoqueShopee/Amazon -
     // so muda o metodo que efetivamente chama a API no final.
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
-        'WHERE L.CODLOJAENTREGA = 1 ' +
-        'AND L.CODLOJAENTREGA = P.LOJA ' +
-        'AND L.LOJA = :LOJA) ' +
+      'WHERE P.LOJA = :LOJAENTREGA ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
@@ -926,6 +934,7 @@ begin
              'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
           'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+    Qry.ParamByName('LOJAENTREGA').AsInteger := FCodLojaEntrega;
     Qry.Open;
     if Qry.IsEmpty then
     begin
@@ -1096,15 +1105,12 @@ begin
   QryAux := TFDQuery.Create(nil);
   try
     Qry.Connection := DZ.ZDatabase;
-    // Mesma consulta/mesma logica de P.LOJA (fisica, sempre 1) x :LOJA
+    // Mesma consulta/mesma logica de :LOJAENTREGA (estoque) x :LOJA
     // (conectada ao marketplace) ja usada em EnviarEstoqueShopee/Amazon/
     // Magalu - so muda o metodo que efetivamente chama a API no final.
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
-        'WHERE L.CODLOJAENTREGA = 1 ' +
-        'AND L.CODLOJAENTREGA = P.LOJA ' +
-        'AND L.LOJA = :LOJA) ' +
+      'WHERE P.LOJA = :LOJAENTREGA ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
@@ -1112,6 +1118,7 @@ begin
              'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
           'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+    Qry.ParamByName('LOJAENTREGA').AsInteger := FCodLojaEntrega;
     Qry.Open;
     if Qry.IsEmpty then
     begin
@@ -1290,14 +1297,11 @@ begin
   QryAux := TFDQuery.Create(nil);
   try
     Qry.Connection := DZ.ZDatabase;
-    // Mesma consulta/mesma logica de P.LOJA (fisica, sempre 1) x :LOJA
+    // Mesma consulta/mesma logica de :LOJAENTREGA (estoque) x :LOJA
     // (conectada ao marketplace) usada pelos outros quatro.
     Qry.SQL.Text :=
       'SELECT * FROM PRO P ' +
-      'WHERE EXISTS (SELECT 1 FROM LOJAS L ' +
-        'WHERE L.CODLOJAENTREGA = 1 ' +
-        'AND (P.LOJA = L.LOJA OR P.LOJA = L.CODLOJAENTREGA)' +
-        'AND L.LOJA = :LOJA) ' +
+      'WHERE P.LOJA = :LOJAENTREGA ' +
       'AND EXISTS (SELECT 1 FROM PRODUTOS_MARKETPLACE PM ' +
         'WHERE PM.CODPRODUTO = P.COD ' +
         'AND PM.LOJA = :LOJA ' +
@@ -1305,6 +1309,7 @@ begin
              'AND COALESCE(PM.ESTOQUE_INFINITO, 0) <> 1) ' +
           'OR PM.ATUALIZARMARKETPLACE = ''S''))';
     Qry.ParamByName('LOJA').AsInteger := FLojaSelecionada;
+    Qry.ParamByName('LOJAENTREGA').AsInteger := FCodLojaEntrega;
     Qry.Open;
     if Qry.IsEmpty then
     begin

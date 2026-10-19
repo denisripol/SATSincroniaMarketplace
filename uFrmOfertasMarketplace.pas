@@ -73,6 +73,13 @@ const
   COL_ESTOQUE_INFINITO = 6;
   COL_VINCULO_FISICO = 7;
   COL_VINCULO_VIRTUAL = 8;
+  // Data da ultima edicao do anuncio, como o PROPRIO marketplace informa na
+  // API (nao vem da PRODUTOS_MARKETPLACE). Campo de cada um:
+  //   Shopee ........ update_time          Mercado Livre ... last_updated
+  //   Amazon ........ lastUpdatedDate      TikTok Shop ..... update_time
+  //   Magalu ........ nao confirmado (updated_at/updatedAt/last_update)
+  // {ATENCAO} Na Shopee, alterar estoque ou preco por API NAO muda essa data.
+  COL_ULTIMA_ALTERACAO = 9;
 type
   // O TikTok e' o unico marketplace do projeto em que a unidade vendida
   // (SKU) nao coincide com o anuncio (produto): um produto tem N SKUs, cada
@@ -88,6 +95,7 @@ type
     Status: string;
     Preco: Double;
     Estoque: Integer;
+    UpdateTime: TDateTime; // update_time do produto (hora local) - 0 = nao veio
   end;
   TOfertaTikTokArray = TArray<TOfertaTikTok>;
 
@@ -149,6 +157,10 @@ type
     function BuscarCodigoExistente(AQuery: TFDQuery;
       const ACodProdutoNoMarketplace: string; out ACodProdutoVinculado: Integer;
       out AEstoqueInfinito: Boolean): Integer;
+    // Data de edicao do anuncio vinda da API -> texto da grade (vazio se 0).
+    function FormatarDataAnuncio(AData: TDateTime): string;
+    // Mesma data -> parametro :ULTIMA_ALT_MARKETPLACE (NULL se 0).
+    procedure DefinirUltimaAltMarketplace(AQuery: TFDQuery; AData: TDateTime);
     function ProximoCodigoProdutoMarketplace(AQuery: TFDQuery): Integer;
     procedure AtualizarEstoqueFisico(AQuery: TFDQuery;
       const ACodProduto, ANovoEstoque: Integer);
@@ -196,7 +208,7 @@ begin
 end;
 procedure TFrmOfertasMarketplace.FormCreate(Sender: TObject);
 begin
-  Grid.ColCount := 9;
+  Grid.ColCount := 10;
   Grid.RowCount := 2; // FixedRows precisa ser sempre < RowCount
   Grid.FixedRows := 1;
   Grid.Cells[COL_ITEMID, 0] := 'Item ID';
@@ -208,6 +220,7 @@ begin
   Grid.Cells[COL_ESTOQUE_INFINITO, 0] := 'Estoque Inf.';
   Grid.Cells[COL_VINCULO_FISICO, 0] := 'Vínculo Físico';
   Grid.Cells[COL_VINCULO_VIRTUAL, 0] := 'Vínculo Virtual';
+  Grid.Cells[COL_ULTIMA_ALTERACAO, 0] := 'Anúncio alterado em';
   // Filtros com um padrao razoavel - ultimos 30 dias de atualizacao, todos
   // os status, sem filtro de texto. O usuario ajusta e clica em "Consultar".
   // {ATENCAO} um ANO pra tras, nao 30 dias. Essa data filtra pela ULTIMA
@@ -579,6 +592,7 @@ begin
     Grid.Cells[COL_ESTOQUE_INFINITO, I] := '';
     Grid.Cells[COL_VINCULO_FISICO, I] := '';
     Grid.Cells[COL_VINCULO_VIRTUAL, I] := '';
+    Grid.Cells[COL_ULTIMA_ALTERACAO, I] := '';
   end;
   Qry := TFDQuery.Create(nil);
   try
@@ -600,6 +614,7 @@ begin
       Grid.Cells[COL_ESTOQUE_INFINITO, I + 1] := IfThen(EstoqueInfinito, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_FISICO, I + 1] := IfThen(CodProdutoVinculado <> 0, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_VIRTUAL, I + 1] := IfThen(CodExistente <> 0, 'Sim', 'Não');
+      Grid.Cells[COL_ULTIMA_ALTERACAO, I + 1] := FormatarDataAnuncio(FItems[I].UpdateTime);
     end;
   finally
     Qry.Free;
@@ -626,6 +641,7 @@ begin
     Grid.Cells[COL_ESTOQUE_INFINITO, I] := '';
     Grid.Cells[COL_VINCULO_FISICO, I] := '';
     Grid.Cells[COL_VINCULO_VIRTUAL, I] := '';
+    Grid.Cells[COL_ULTIMA_ALTERACAO, I] := '';
   end;
   Qry := TFDQuery.Create(nil);
   try
@@ -648,6 +664,7 @@ begin
       Grid.Cells[COL_ESTOQUE_INFINITO, I + 1] := IfThen(EstoqueInfinito, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_FISICO, I + 1] := IfThen(CodProdutoVinculado <> 0, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_VIRTUAL, I + 1] := IfThen(CodExistente <> 0, 'Sim', 'Não');
+      Grid.Cells[COL_ULTIMA_ALTERACAO, I + 1] := FormatarDataAnuncio(FAmazonItems[I].LastUpdated);
     end;
   finally
     Qry.Free;
@@ -674,6 +691,7 @@ begin
     Grid.Cells[COL_ESTOQUE_INFINITO, I] := '';
     Grid.Cells[COL_VINCULO_FISICO, I] := '';
     Grid.Cells[COL_VINCULO_VIRTUAL, I] := '';
+    Grid.Cells[COL_ULTIMA_ALTERACAO, I] := '';
   end;
   Qry := TFDQuery.Create(nil);
   try
@@ -696,6 +714,7 @@ begin
       Grid.Cells[COL_ESTOQUE_INFINITO, I + 1] := IfThen(EstoqueInfinito, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_FISICO, I + 1] := IfThen(CodProdutoVinculado <> 0, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_VIRTUAL, I + 1] := IfThen(CodExistente <> 0, 'Sim', 'Não');
+      Grid.Cells[COL_ULTIMA_ALTERACAO, I + 1] := FormatarDataAnuncio(FMercadoLivreItems[I].LastUpdated);
     end;
   finally
     Qry.Free;
@@ -722,6 +741,7 @@ begin
     Grid.Cells[COL_ESTOQUE_INFINITO, I] := '';
     Grid.Cells[COL_VINCULO_FISICO, I] := '';
     Grid.Cells[COL_VINCULO_VIRTUAL, I] := '';
+    Grid.Cells[COL_ULTIMA_ALTERACAO, I] := '';
   end;
   Qry := TFDQuery.Create(nil);
   try
@@ -741,6 +761,7 @@ begin
       Grid.Cells[COL_ESTOQUE_INFINITO, I + 1] := IfThen(EstoqueInfinito, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_FISICO, I + 1] := IfThen(CodProdutoVinculado <> 0, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_VIRTUAL, I + 1] := IfThen(CodExistente <> 0, 'Sim', 'Não');
+      Grid.Cells[COL_ULTIMA_ALTERACAO, I + 1] := FormatarDataAnuncio(FMagaluItems[I].LastUpdated);
     end;
   finally
     Qry.Free;
@@ -790,6 +811,30 @@ begin
   end;
   AQuery.Close;
 end;
+function TFrmOfertasMarketplace.FormatarDataAnuncio(AData: TDateTime): string;
+begin
+  // 0 = o marketplace nao mandou a data: celula em branco, e nao 30/12/1899.
+  if AData > 0 then
+    Result := FormatDateTime('dd/mm/yyyy hh:nn', AData)
+  else
+    Result := '';
+end;
+// {PEDIDO DO CLIENTE - 19/10/2026} PRODUTOS_MARKETPLACE.ULTIMA_ALT_MARKETPLACE
+// guarda a data de edicao do anuncio informada pela API (a mesma da coluna
+// "Anuncio alterado em"). Nao confundir com DATAULTIMAALTERACAO, que e' quando
+// o SAT gravou o registro.
+procedure TFrmOfertasMarketplace.DefinirUltimaAltMarketplace(AQuery: TFDQuery;
+  AData: TDateTime);
+begin
+  if AData > 0 then
+    AQuery.ParamByName('ULTIMA_ALT_MARKETPLACE').AsDateTime := AData
+  else
+  begin
+    // Tipo explicito: parametro sem tipo e sem valor o Firebird recusa.
+    AQuery.ParamByName('ULTIMA_ALT_MARKETPLACE').DataType := ftTimeStamp;
+    AQuery.ParamByName('ULTIMA_ALT_MARKETPLACE').Clear;
+  end;
+end;
 procedure TFrmOfertasMarketplace.AtualizarEstoqueFisico(AQuery: TFDQuery;
   const ACodProduto, ANovoEstoque: Integer);
 begin
@@ -830,10 +875,10 @@ begin
       'CODPRODUTONOMARKETPLACE, DISPONIBILIZARMARKETPLACE, ' +
       'ATUALIZARMARKETPLACE, EXCLUIDO, ATUALIZAR_ESTOQUE_MARKETPLACE, ' +
       'DESCRICAO, ESTOQUE, PRECO, ' +
-      'DATAULTIMAALTERACAO, LOJA) ' +
+      'DATAULTIMAALTERACAO, ULTIMA_ALT_MARKETPLACE, LOJA) ' +
       'VALUES (:CODPRODUTOS_MARKETPLACE, NULL, :CODMARKETPLACE, ' +
       ':CODPRODUTONOMARKETPLACE, ''N'', ''N'', ''N'', ''S'', :DESCRICAO, ' +
-      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :LOJA)';
+      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :ULTIMA_ALT_MARKETPLACE, :LOJA)';
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := NovoCodigo;
     AQuery.ParamByName('CODMARKETPLACE').AsInteger := FCodMarketplace;
     AQuery.ParamByName('CODPRODUTONOMARKETPLACE').AsString := IntToStr(AItem.ItemID);
@@ -842,6 +887,7 @@ begin
     AQuery.ParamByName('PRECO').AsFloat := AItem.OriginalPrice;
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     AQuery.ParamByName('LOJA').AsInteger := FLoja;
+    DefinirUltimaAltMarketplace(AQuery, AItem.UpdateTime);
     AQuery.ExecSQL;
     Log('  Novo: ' + AItem.ItemName + ' (ID ' + IntToStr(AItem.ItemID) + ')');
   end
@@ -860,6 +906,10 @@ begin
       'ATUALIZAR_ESTOQUE_MARKETPLACE = ''S''';
     if not EstoqueInfinito then
       SqlUpdate := SqlUpdate + ', ESTOQUE = :ESTOQUE';
+    // Data de edicao do anuncio vinda da API. Se o marketplace nao mandou
+    // (0), nao mexe no que ja estava gravado.
+    if AItem.UpdateTime > 0 then
+      SqlUpdate := SqlUpdate + ', ULTIMA_ALT_MARKETPLACE = :ULTIMA_ALT_MARKETPLACE';
     SqlUpdate := SqlUpdate + ' WHERE CODPRODUTOS_MARKETPLACE = :CODPRODUTOS_MARKETPLACE';
     AQuery.Close;
     AQuery.SQL.Text := SqlUpdate;
@@ -868,6 +918,8 @@ begin
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     if not EstoqueInfinito then
       AQuery.ParamByName('ESTOQUE').AsInteger := AItem.Stock;
+    if AItem.UpdateTime > 0 then
+      DefinirUltimaAltMarketplace(AQuery, AItem.UpdateTime);
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := CodExistente;
     AQuery.ExecSQL;
     if EstoqueInfinito then
@@ -906,10 +958,10 @@ begin
       'CODPRODUTONOMARKETPLACE, DISPONIBILIZARMARKETPLACE, ' +
       'ATUALIZARMARKETPLACE, EXCLUIDO, ATUALIZAR_ESTOQUE_MARKETPLACE, ' +
       'DESCRICAO, ESTOQUE, PRECO, ' +
-      'DATAULTIMAALTERACAO, LOJA) ' +
+      'DATAULTIMAALTERACAO, ULTIMA_ALT_MARKETPLACE, LOJA) ' +
       'VALUES (:CODPRODUTOS_MARKETPLACE, NULL, :CODMARKETPLACE, ' +
       ':CODPRODUTONOMARKETPLACE, ''N'', ''N'', ''N'', ''S'', :DESCRICAO, ' +
-      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :LOJA)';
+      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :ULTIMA_ALT_MARKETPLACE, :LOJA)';
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := NovoCodigo;
     AQuery.ParamByName('CODMARKETPLACE').AsInteger := FCodMarketplace;
     AQuery.ParamByName('CODPRODUTONOMARKETPLACE').AsString := AItem.SKU;
@@ -918,6 +970,7 @@ begin
     AQuery.ParamByName('PRECO').AsFloat := AItem.Price;
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     AQuery.ParamByName('LOJA').AsInteger := FLoja;
+    DefinirUltimaAltMarketplace(AQuery, AItem.LastUpdated);
     AQuery.ExecSQL;
     Log('  Novo: ' + AItem.ItemName + ' (SKU ' + AItem.SKU + ')');
   end
@@ -929,6 +982,10 @@ begin
       'ATUALIZAR_ESTOQUE_MARKETPLACE = ''S''';
     if not EstoqueInfinito then
       SqlUpdate := SqlUpdate + ', ESTOQUE = :ESTOQUE';
+    // Data de edicao do anuncio vinda da API. Se o marketplace nao mandou
+    // (0), nao mexe no que ja estava gravado.
+    if AItem.LastUpdated > 0 then
+      SqlUpdate := SqlUpdate + ', ULTIMA_ALT_MARKETPLACE = :ULTIMA_ALT_MARKETPLACE';
     SqlUpdate := SqlUpdate + ' WHERE CODPRODUTOS_MARKETPLACE = :CODPRODUTOS_MARKETPLACE';
     AQuery.Close;
     AQuery.SQL.Text := SqlUpdate;
@@ -937,6 +994,8 @@ begin
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     if not EstoqueInfinito then
       AQuery.ParamByName('ESTOQUE').AsInteger := AItem.Stock;
+    if AItem.LastUpdated > 0 then
+      DefinirUltimaAltMarketplace(AQuery, AItem.LastUpdated);
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := CodExistente;
     AQuery.ExecSQL;
     if EstoqueInfinito then
@@ -966,10 +1025,10 @@ begin
       'CODPRODUTONOMARKETPLACE, DISPONIBILIZARMARKETPLACE, ' +
       'ATUALIZARMARKETPLACE, EXCLUIDO, ATUALIZAR_ESTOQUE_MARKETPLACE, ' +
       'DESCRICAO, ESTOQUE, PRECO, ' +
-      'DATAULTIMAALTERACAO, LOJA) ' +
+      'DATAULTIMAALTERACAO, ULTIMA_ALT_MARKETPLACE, LOJA) ' +
       'VALUES (:CODPRODUTOS_MARKETPLACE, NULL, :CODMARKETPLACE, ' +
       ':CODPRODUTONOMARKETPLACE, ''N'', ''N'', ''N'', ''S'', :DESCRICAO, ' +
-      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :LOJA)';
+      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :ULTIMA_ALT_MARKETPLACE, :LOJA)';
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := NovoCodigo;
     AQuery.ParamByName('CODMARKETPLACE').AsInteger := FCodMarketplace;
     AQuery.ParamByName('CODPRODUTONOMARKETPLACE').AsString := AItem.ItemId;
@@ -978,6 +1037,7 @@ begin
     AQuery.ParamByName('PRECO').AsFloat := AItem.Price;
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     AQuery.ParamByName('LOJA').AsInteger := FLoja;
+    DefinirUltimaAltMarketplace(AQuery, AItem.LastUpdated);
     AQuery.ExecSQL;
     Log('  Novo: ' + AItem.Title + ' (' + AItem.ItemId + ')');
   end
@@ -989,6 +1049,10 @@ begin
       'ATUALIZAR_ESTOQUE_MARKETPLACE = ''S''';
     if not EstoqueInfinito then
       SqlUpdate := SqlUpdate + ', ESTOQUE = :ESTOQUE';
+    // Data de edicao do anuncio vinda da API. Se o marketplace nao mandou
+    // (0), nao mexe no que ja estava gravado.
+    if AItem.LastUpdated > 0 then
+      SqlUpdate := SqlUpdate + ', ULTIMA_ALT_MARKETPLACE = :ULTIMA_ALT_MARKETPLACE';
     SqlUpdate := SqlUpdate + ' WHERE CODPRODUTOS_MARKETPLACE = :CODPRODUTOS_MARKETPLACE';
     AQuery.Close;
     AQuery.SQL.Text := SqlUpdate;
@@ -997,6 +1061,8 @@ begin
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     if not EstoqueInfinito then
       AQuery.ParamByName('ESTOQUE').AsInteger := AItem.AvailableQuantity;
+    if AItem.LastUpdated > 0 then
+      DefinirUltimaAltMarketplace(AQuery, AItem.LastUpdated);
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := CodExistente;
     AQuery.ExecSQL;
     if EstoqueInfinito then
@@ -1023,10 +1089,10 @@ begin
       'CODPRODUTONOMARKETPLACE, DISPONIBILIZARMARKETPLACE, ' +
       'ATUALIZARMARKETPLACE, EXCLUIDO, ATUALIZAR_ESTOQUE_MARKETPLACE, ' +
       'DESCRICAO, ESTOQUE, PRECO, ' +
-      'DATAULTIMAALTERACAO, LOJA) ' +
+      'DATAULTIMAALTERACAO, ULTIMA_ALT_MARKETPLACE, LOJA) ' +
       'VALUES (:CODPRODUTOS_MARKETPLACE, NULL, :CODMARKETPLACE, ' +
       ':CODPRODUTONOMARKETPLACE, ''N'', ''N'', ''N'', ''S'', :DESCRICAO, ' +
-      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :LOJA)';
+      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :ULTIMA_ALT_MARKETPLACE, :LOJA)';
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := NovoCodigo;
     AQuery.ParamByName('CODMARKETPLACE').AsInteger := FCodMarketplace;
     AQuery.ParamByName('CODPRODUTONOMARKETPLACE').AsString := AItem.Sku;
@@ -1035,6 +1101,7 @@ begin
     AQuery.ParamByName('PRECO').AsFloat := AItem.Price;
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     AQuery.ParamByName('LOJA').AsInteger := FLoja;
+    DefinirUltimaAltMarketplace(AQuery, AItem.LastUpdated);
     AQuery.ExecSQL;
     Log('  Novo: ' + AItem.Description + ' (SKU ' + AItem.Sku + ')');
   end
@@ -1046,6 +1113,10 @@ begin
       'ATUALIZAR_ESTOQUE_MARKETPLACE = ''S''';
     if not EstoqueInfinito then
       SqlUpdate := SqlUpdate + ', ESTOQUE = :ESTOQUE';
+    // Data de edicao do anuncio vinda da API. Se o marketplace nao mandou
+    // (0), nao mexe no que ja estava gravado.
+    if AItem.LastUpdated > 0 then
+      SqlUpdate := SqlUpdate + ', ULTIMA_ALT_MARKETPLACE = :ULTIMA_ALT_MARKETPLACE';
     SqlUpdate := SqlUpdate + ' WHERE CODPRODUTOS_MARKETPLACE = :CODPRODUTOS_MARKETPLACE';
     AQuery.Close;
     AQuery.SQL.Text := SqlUpdate;
@@ -1054,6 +1125,8 @@ begin
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     if not EstoqueInfinito then
       AQuery.ParamByName('ESTOQUE').AsInteger := AItem.Stock;
+    if AItem.LastUpdated > 0 then
+      DefinirUltimaAltMarketplace(AQuery, AItem.LastUpdated);
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := CodExistente;
     AQuery.ExecSQL;
     if EstoqueInfinito then
@@ -1124,6 +1197,8 @@ begin
         Achatadas[Total].Status := Produtos[I].Status;
         Achatadas[Total].Preco := Produtos[I].Skus[J].Preco;
         Achatadas[Total].Estoque := Produtos[I].Skus[J].Estoque;
+        // A API so' informa a data por PRODUTO - todos os SKUs dele herdam.
+        Achatadas[Total].UpdateTime := Produtos[I].UpdateTime;
         // Produto com mais de um SKU: poe o SKU do vendedor no titulo, senao
         // a grade mostra varias linhas com a MESMA descricao e nao da' pra
         // saber qual e' qual na hora de vincular ao produto fisico.
@@ -1191,6 +1266,7 @@ begin
     Grid.Cells[COL_ESTOQUE_INFINITO, I] := '';
     Grid.Cells[COL_VINCULO_FISICO, I] := '';
     Grid.Cells[COL_VINCULO_VIRTUAL, I] := '';
+    Grid.Cells[COL_ULTIMA_ALTERACAO, I] := '';
   end;
   Qry := TFDQuery.Create(nil);
   try
@@ -1211,6 +1287,7 @@ begin
       Grid.Cells[COL_ESTOQUE_INFINITO, I + 1] := IfThen(EstoqueInfinito, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_FISICO, I + 1] := IfThen(CodProdutoVinculado <> 0, 'Sim', 'Não');
       Grid.Cells[COL_VINCULO_VIRTUAL, I + 1] := IfThen(CodExistente <> 0, 'Sim', 'Não');
+      Grid.Cells[COL_ULTIMA_ALTERACAO, I + 1] := FormatarDataAnuncio(FTikTokItems[I].UpdateTime);
     end;
   finally
     Qry.Free;
@@ -1241,10 +1318,10 @@ begin
       'CODPRODUTONOMARKETPLACE, DISPONIBILIZARMARKETPLACE, ' +
       'ATUALIZARMARKETPLACE, EXCLUIDO, ATUALIZAR_ESTOQUE_MARKETPLACE, ' +
       'DESCRICAO, ESTOQUE, PRECO, ' +
-      'DATAULTIMAALTERACAO, LOJA) ' +
+      'DATAULTIMAALTERACAO, ULTIMA_ALT_MARKETPLACE, LOJA) ' +
       'VALUES (:CODPRODUTOS_MARKETPLACE, NULL, :CODMARKETPLACE, ' +
       ':CODPRODUTONOMARKETPLACE, ''N'', ''N'', ''N'', ''S'', :DESCRICAO, ' +
-      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :LOJA)';
+      ':ESTOQUE, :PRECO, :DATAULTIMAALTERACAO, :ULTIMA_ALT_MARKETPLACE, :LOJA)';
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := NovoCodigo;
     AQuery.ParamByName('CODMARKETPLACE').AsInteger := FCodMarketplace;
     AQuery.ParamByName('CODPRODUTONOMARKETPLACE').AsString := AItem.Chave;
@@ -1253,6 +1330,7 @@ begin
     AQuery.ParamByName('PRECO').AsFloat := AItem.Preco;
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     AQuery.ParamByName('LOJA').AsInteger := FLoja;
+    DefinirUltimaAltMarketplace(AQuery, AItem.UpdateTime);
     AQuery.ExecSQL;
     Log('  Novo: ' + AItem.Titulo + ' (' + AItem.Chave + ')');
   end
@@ -1264,6 +1342,10 @@ begin
       'ATUALIZAR_ESTOQUE_MARKETPLACE = ''S''';
     if not EstoqueInfinito then
       SqlUpdate := SqlUpdate + ', ESTOQUE = :ESTOQUE';
+    // Data de edicao do anuncio vinda da API. Se o marketplace nao mandou
+    // (0), nao mexe no que ja estava gravado.
+    if AItem.UpdateTime > 0 then
+      SqlUpdate := SqlUpdate + ', ULTIMA_ALT_MARKETPLACE = :ULTIMA_ALT_MARKETPLACE';
     SqlUpdate := SqlUpdate + ' WHERE CODPRODUTOS_MARKETPLACE = :CODPRODUTOS_MARKETPLACE';
     AQuery.Close;
     AQuery.SQL.Text := SqlUpdate;
@@ -1272,6 +1354,8 @@ begin
     AQuery.ParamByName('DATAULTIMAALTERACAO').AsDateTime := Now;
     if not EstoqueInfinito then
       AQuery.ParamByName('ESTOQUE').AsInteger := AItem.Estoque;
+    if AItem.UpdateTime > 0 then
+      DefinirUltimaAltMarketplace(AQuery, AItem.UpdateTime);
     AQuery.ParamByName('CODPRODUTOS_MARKETPLACE').AsInteger := CodExistente;
     AQuery.ExecSQL;
     if EstoqueInfinito then
