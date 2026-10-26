@@ -65,6 +65,12 @@ type
     TotalAmount: Double;
     BuyerId: string;
     BuyerNickname: string;
+    ShippingId: string;      // shipping.id - vazio em pedido sem Mercado Envios
+                             // ("a combinar" com o comprador)
+    ShippingStatus: string;  // NAO vem no /orders/search: o chamador preenche
+                             // com GetShipmentStatus (pending, handling,
+                             // ready_to_ship, shipped, delivered,
+                             // not_delivered, cancelled)
   end;
   TMercadoLivreOrderArray = TArray<TMercadoLivreOrder>;
 
@@ -323,6 +329,12 @@ type
     // oculto por falta de confirmacao de pagamento.
     function GetShipment(const AAccessToken, AShipmentId: string;
       out AShipment: TMercadoLivreShipment; out AErrorMessage: string): Boolean;
+
+    // So' o status do envio (mesmo GET /shipments/{id} do GetShipment), pra
+    // ser chamado pedido a pedido na listagem. Diferente do GetShipment, NAO
+    // grava a resposta crua no log - ela traz endereco do comprador.
+    function GetShipmentStatus(const AAccessToken, AShipmentId: string;
+      out AStatus, ASubstatus, AErrorMessage: string): Boolean;
 
     // --- Etiqueta de envio (Mercado Envios) ---
     // Baixa o PDF da etiqueta de UM envio (GET /shipment_labels?
@@ -748,8 +760,9 @@ function TMercadoLivreOpenAPIClient.GetOrders(const AAccessToken, ASellerId: str
 var
   ResponseStr: string;
   StatusCode: Integer;
-  JSONRoot, Order, Seller: TJSONObject;
+  JSONRoot, Order, Seller, Shipping: TJSONObject;
   JSONResults: TJSONArray;
+  ShippingIdValor: TJSONValue;
   I: Integer;
   DataStr: string;
 begin
@@ -803,6 +816,14 @@ begin
           if Assigned(Seller.GetValue('id')) then
             AOrders[I].BuyerId := Seller.GetValue<Int64>('id').ToString;
         Seller.TryGetValue<string>('nickname', AOrders[I].BuyerNickname);
+      end;
+
+      // shipping.id vem como numero ou null (pedido sem Mercado Envios).
+      if Order.TryGetValue<TJSONObject>('shipping', Shipping) then
+      begin
+        ShippingIdValor := Shipping.GetValue('id');
+        if Assigned(ShippingIdValor) and not (ShippingIdValor is TJSONNull) then
+          AOrders[I].ShippingId := ShippingIdValor.Value;
       end;
     end;
 
@@ -1104,6 +1125,53 @@ begin
     if AShipment.ReceiverPhone = '' then
       AShipment.ReceiverPhone := ValorJSONAninhado(JSONRoot, 'receiver_phone');
 
+    Result := True;
+  finally
+    JSONRoot.Free;
+  end;
+end;
+
+function TMercadoLivreOpenAPIClient.GetShipmentStatus(const AAccessToken,
+  AShipmentId: string; out AStatus, ASubstatus, AErrorMessage: string): Boolean;
+var
+  ResponseStr: string;
+  StatusCode: Integer;
+  JSONRoot: TJSONObject;
+begin
+  Result := False;
+  AStatus := '';
+  ASubstatus := '';
+  AErrorMessage := '';
+
+  if Trim(AShipmentId) = '' then
+  begin
+    AErrorMessage := 'Pedido sem envio associado (shipping.id vazio).';
+    Exit;
+  end;
+
+  ResponseStr := ExecuteGet('/shipments/' + TNetEncoding.URL.Encode(AShipmentId), '',
+    AAccessToken, [TNetHeader.Create('x-format-new', 'true')], StatusCode);
+
+  if StatusCode <> 200 then
+  begin
+    AErrorMessage := FormatarErroHTTP(StatusCode, ResponseStr, 'buscar status do envio');
+    DoLog('GetShipmentStatus (' + AShipmentId + '): HTTP ' + StatusCode.ToString +
+      ' ' + AErrorMessage);
+    Exit;
+  end;
+
+  JSONRoot := TJSONObject.ParseJSONValue(ResponseStr) as TJSONObject;
+  if not Assigned(JSONRoot) then
+  begin
+    AErrorMessage := 'Resposta não é um JSON válido';
+    Exit;
+  end;
+  try
+    JSONRoot.TryGetValue<string>('status', AStatus);
+    JSONRoot.TryGetValue<string>('substatus', ASubstatus);
+    // So' o status no log - a resposta crua tem o endereco do comprador.
+    DoLog('GetShipmentStatus (' + AShipmentId + '): HTTP 200 status=' + AStatus +
+      ' substatus=' + ASubstatus);
     Result := True;
   finally
     JSONRoot.Free;
