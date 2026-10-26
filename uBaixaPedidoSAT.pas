@@ -443,10 +443,12 @@ begin
     AQuery.SQL.Text :=
       'INSERT INTO OE (DATA, XPED, MARKETPLACE_STATUS, HORA, ' +
       'DATAHORADOENVIO, TOTALDOPEDIDO, TOTAL, LBRUTO, VALOR_CON, FRETE, ' +
-      'MOTIVO_E, DATA_ENT, CODCLI, OBS, ACRESCIMOFINANCEIRO) ' +
+      'MOTIVO_E, DATA_ENT, CODCLI, OBS, ACRESCIMOFINANCEIRO, TIPO) ' +
       'VALUES (CURRENT_DATE, :XPED, :MARKETPLACE_STATUS, :HORA, ' +
       ':DATAHORADOENVIO, :TOTALDOPEDIDO, :TOTAL, :LBRUTO, :VALOR_CON, ' +
-      ':FRETE, :MOTIVO_E, :DATA_ENT, :CODCLI, :OBS, :ACRESCIMOFINANCEIRO) ' +
+      ':FRETE, :MOTIVO_E, :DATA_ENT, :CODCLI, :OBS, :ACRESCIMOFINANCEIRO, ' +
+      // TIPO fixo 'O' pra todos os marketplaces (pedido do cliente, 26/10/2026).
+      '''O'') ' +
       'RETURNING ID_OE';
     AQuery.ParamByName('XPED').AsString := ADados.CodPedidoMarketplace;
     AQuery.ParamByName('MARKETPLACE_STATUS').AsString := ADados.StatusMarketplace;

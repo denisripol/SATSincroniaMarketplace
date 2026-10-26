@@ -198,6 +198,10 @@ type
 
     procedure CarregarPedidosMercadoLivre;
 
+    procedure BuscarStatusEnvioMercadoLivre;
+
+    function StatusEnvioMercadoLivre(ALinha: Integer): string;
+
     procedure CarregarPedidosTikTokShop;
 
     procedure AtualizarEstadoBotoes(const ALinha: Integer = -1);
@@ -877,6 +881,20 @@ begin
 
 
 
+    // O status do PEDIDO no ML (paid, cancelled...) nao diz se ele ja saiu -
+
+    // isso so' o status do ENVIO diz, e ele nao vem no /orders/search. Busca
+
+    // um por um, so' dos pedidos pagos com Mercado Envios, pra habilitar o
+
+    // "Baixar Pedido SAT" pela mesma regra dos outros marketplaces (so'
+
+    // depois de despachado).
+
+    BuscarStatusEnvioMercadoLivre;
+
+
+
     Grid.RowCount := Length(FMercadoLivreOrders) + 1;
 
     if Grid.RowCount < 2 then
@@ -907,7 +925,19 @@ begin
 
       Grid.Cells[0, I + 1] := FMercadoLivreOrders[I].OrderId;
 
-      Grid.Cells[1, I + 1] := FMercadoLivreOrders[I].Status;
+      // Mostra os dois status: o do pedido e, quando houver, o do envio
+
+      // (e' o do envio que decide o "Baixar Pedido SAT").
+
+      if FMercadoLivreOrders[I].ShippingStatus <> '' then
+
+        Grid.Cells[1, I + 1] := FMercadoLivreOrders[I].Status + ' (envio: ' +
+
+          FMercadoLivreOrders[I].ShippingStatus + ')'
+
+      else
+
+        Grid.Cells[1, I + 1] := FMercadoLivreOrders[I].Status;
 
       Grid.Cells[2, I + 1] := FormatDateTime('dd/mm/yy hh:nn:ss', FMercadoLivreOrders[I].DateCreated);
 
@@ -921,6 +951,66 @@ begin
 
   end;
 
+end;
+
+
+
+// Preenche FMercadoLivreOrders[].ShippingStatus, um GET /shipments/{id} por
+
+// pedido. Pula cancelado, pagamento pendente e pedido sem Mercado Envios ("a
+
+// combinar"), que nao tem envio pra consultar - esses ficam com o status do
+
+// envio vazio e o "Baixar Pedido SAT" desabilitado. Falha numa consulta nao
+
+// derruba a listagem: so' aquele pedido fica sem status de envio.
+
+procedure TFrmPedidosMarketplace.BuscarStatusEnvioMercadoLivre;
+var
+  Cliente: TMercadoLivreOpenAPIClient;
+  Substatus, ErroMsg: string;
+  I, Consultados, Falhas: Integer;
+begin
+  Consultados := 0;
+  Falhas := 0;
+  Cliente := TMercadoLivreOpenAPIClient.Create(FDevClientId, FDevClientSecret, '', FSandbox);
+  Cliente.OnLog := Log;
+  try
+    for I := Low(FMercadoLivreOrders) to High(FMercadoLivreOrders) do
+    begin
+      FMercadoLivreOrders[I].ShippingStatus := '';
+      // partially_refunded: pedido pago com devolucao parcial - pode ja ter
+      // sido despachado, entao tambem consulta.
+      if not (SameText(FMercadoLivreOrders[I].Status, 'paid') or
+              SameText(FMercadoLivreOrders[I].Status, 'partially_refunded')) or
+         (FMercadoLivreOrders[I].ShippingId = '') then
+        Continue;
+      Inc(Consultados);
+      if not Cliente.GetShipmentStatus(FToken, FMercadoLivreOrders[I].ShippingId,
+           FMercadoLivreOrders[I].ShippingStatus, Substatus, ErroMsg) then
+      begin
+        Inc(Falhas);
+        Log('Aviso: nao foi possivel consultar o envio do pedido ' +
+          FMercadoLivreOrders[I].OrderId + ' (' + ErroMsg + ') - "Baixar Pedido ' +
+          'SAT" fica desabilitado para ele ate a proxima listagem.');
+      end;
+    end;
+  finally
+    Cliente.Free;
+  end;
+  if Consultados > 0 then
+    Log(Format('Status do envio consultado em %d pedido(s), %d com falha.',
+      [Consultados, Falhas]));
+end;
+
+// Status do envio do pedido na linha ALinha da grade, ou '' quando nao ha.
+// Confere o numero do pedido com a grade antes de usar o indice do array.
+function TFrmPedidosMarketplace.StatusEnvioMercadoLivre(ALinha: Integer): string;
+begin
+  Result := '';
+  if (ALinha >= 1) and (ALinha - 1 <= High(FMercadoLivreOrders)) and
+     (FMercadoLivreOrders[ALinha - 1].OrderId = Grid.Cells[0, ALinha]) then
+    Result := FMercadoLivreOrders[ALinha - 1].ShippingStatus;
 end;
 
 
@@ -941,7 +1031,7 @@ procedure TFrmPedidosMarketplace.AtualizarEstadoBotoes(const ALinha: Integer = -
 
 var
 
-  Status: string;
+  Status, StatusDespacho: string;
 
   Linha: Integer;
 
@@ -1079,13 +1169,25 @@ begin
 
 
 
-  // "Baixar Pedido SAT" - unico botao valido pros 3 marketplaces (e' o
+  // "Baixar Pedido SAT" - mesmo fluxo generico (uBaixaPedidoSAT) pra todos os
 
-  // mesmo fluxo generico, uBaixaPedidoSAT), habilitado so quando o pedido
+  // marketplaces, habilitado so quando o pedido ja foi despachado (antes
 
-  // ja foi despachado (antes disso nao faz sentido gerar a venda no SAT).
+  // disso nao faz sentido gerar a venda no SAT). No Mercado Livre quem diz
 
-  CmdBaixarPedidoSAT.Enabled := TemPedidoSelecionado and StatusIndicaDespachado(Status);
+  // isso e' o status do ENVIO, nao o do pedido que aparece na grade.
+
+  if TemPedidoSelecionado and
+
+     (TMarketplaces(FCodMarketplace) = TMarketplaces.MercadoLivre) then
+
+    StatusDespacho := StatusEnvioMercadoLivre(Linha)
+
+  else
+
+    StatusDespacho := Status;
+
+  CmdBaixarPedidoSAT.Enabled := TemPedidoSelecionado and StatusIndicaDespachado(StatusDespacho);
 
 end;
 
@@ -1176,6 +1278,16 @@ begin
       // dois nomes mais prováveis pra "despachado em diante".
 
       Result := SameText(AStatus, 'SHIPPED') or SameText(AStatus, 'DELIVERED');
+
+    TMarketplaces.MercadoLivre:
+
+      // Aqui AStatus e' o status do ENVIO (GET /shipments/{id}), nao o do
+
+      // pedido. not_delivered (saiu mas nao foi entregue - devolucao, extravio)
+
+      // NAO entra.
+
+      Result := SameText(AStatus, 'shipped') or SameText(AStatus, 'delivered');
 
     TMarketplaces.TikTokShop:
 
@@ -4271,7 +4383,15 @@ begin
       if not TemEnvio then
         Log('Aviso: nao foi possivel obter o envio ' + Detalhe.ShippingId +
           ' do pedido ' + AOrderSN + ' (' + ErroEnvio + ') - endereco de entrega ' +
-          'ficara vazio.');
+          'ficara vazio.')
+      // Confere de novo na hora da baixa: o botao foi habilitado pelo status
+      // lido na listagem, que pode ter mudado (ex.: envio cancelado).
+      else if not StatusIndicaDespachado(Envio.Status) then
+      begin
+        AErroMsg := 'o pedido ainda nao foi despachado no Mercado Livre (status ' +
+          'do envio: ' + Envio.Status + '). Baixe no SAT depois do despacho.';
+        Exit;
+      end;
     end
     else
       Log('Aviso: pedido ' + AOrderSN + ' nao tem envio associado (shipping.id ' +
