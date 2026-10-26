@@ -169,6 +169,9 @@ function BaixarPedidoSAT(AQuery: TFDQuery; const ADados: TDadosPedidoSAT;
 
 implementation
 
+uses
+  uMarketplace;
+
 { TCampoObs }
 
 constructor TCampoObs.Create(const ANome, AValor: string);
@@ -443,13 +446,18 @@ begin
     AQuery.SQL.Text :=
       'INSERT INTO OE (DATA, XPED, MARKETPLACE_STATUS, HORA, ' +
       'DATAHORADOENVIO, TOTALDOPEDIDO, TOTAL, LBRUTO, VALOR_CON, FRETE, ' +
-      'MOTIVO_E, DATA_ENT, CODCLI, OBS, ACRESCIMOFINANCEIRO, TIPO) ' +
+      'MOTIVO_E, DATA_ENT, CODCLI, OBS, ACRESCIMOFINANCEIRO, TIPO, DIG) ' +
       'VALUES (CURRENT_DATE, :XPED, :MARKETPLACE_STATUS, :HORA, ' +
       ':DATAHORADOENVIO, :TOTALDOPEDIDO, :TOTAL, :LBRUTO, :VALOR_CON, ' +
       ':FRETE, :MOTIVO_E, :DATA_ENT, :CODCLI, :OBS, :ACRESCIMOFINANCEIRO, ' +
       // TIPO fixo 'O' pra todos os marketplaces (pedido do cliente, 26/10/2026).
-      '''O'') ' +
+      '''O'', :DIG) ' +
       'RETURNING ID_OE';
+    // DIG = nome do marketplace de origem ("Shopee", "Mercado Livre"...),
+    // pedido do cliente 26/10/2026. Coluna VARCHAR(25) - o maior nome hoje
+    // tem 13 caracteres.
+    AQuery.ParamByName('DIG').AsString :=
+      NomeMarketplace(TMarketplaces(ADados.CodMarketplace));
     AQuery.ParamByName('XPED').AsString := ADados.CodPedidoMarketplace;
     AQuery.ParamByName('MARKETPLACE_STATUS').AsString := ADados.StatusMarketplace;
     AQuery.ParamByName('HORA').AsDateTime := ADados.DataCriacao;
