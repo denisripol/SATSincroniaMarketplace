@@ -370,6 +370,29 @@ begin
   end;
 end;
 
+// Loja de entrega da loja conectada (LOJAS.CODLOJAENTREGA) - vai pra
+// IOE.LOJAENTR de cada item (pedido do cliente 27/10/2026). Mesma regra do
+// F2: sem loja de entrega cadastrada a baixa nao continua. Chamada ANTES de
+// qualquer INSERT, entao a falha nao deixa nada gravado pela metade.
+function BuscarLojaEntregaDaLoja(AQuery: TFDQuery; const ALoja: Integer): Integer;
+begin
+  AQuery.Close;
+  AQuery.SQL.Text := 'SELECT CODLOJAENTREGA FROM LOJAS WHERE LOJA = :LOJA';
+  AQuery.ParamByName('LOJA').AsInteger := ALoja;
+  AQuery.Open;
+  try
+    if AQuery.IsEmpty then
+      raise Exception.Create('Loja ' + ALoja.ToString + ' nao encontrada.');
+    Result := AQuery.FieldByName('CODLOJAENTREGA').AsInteger;
+    if Result = 0 then
+      raise Exception.Create('Loja ' + ALoja.ToString + ' sem loja de entrega ' +
+        'cadastrada (LOJAS.CODLOJAENTREGA). Cadastre a loja de entrega e ' +
+        'baixe o pedido de novo.');
+  finally
+    AQuery.Close;
+  end;
+end;
+
 function BaixarPedidoSAT(AQuery: TFDQuery; const ADados: TDadosPedidoSAT;
   out ARetornoProcedure: Integer; out AErroInformacaoAdicional: string;
   out AErrorMessage: string): Boolean;
@@ -383,6 +406,7 @@ var
   SomaLBruto, SomaTotal, SomaValorCon: Double;
   ObsCabecalho: string;
   FormaDePgto: Integer;
+  LojaEntrega: Integer;
   ProximoIdItem: Integer;
 begin
   Result := False;
@@ -439,6 +463,7 @@ begin
     // se a loja nao tiver MARKETPLACE_FORMADEPGTO configurado, falha aqui
     // (rollback automatico no except abaixo, nada fica gravado pela metade).
     FormaDePgto := BuscarFormaDePgtoDaLoja(AQuery, ADados.Loja);
+    LojaEntrega := BuscarLojaEntregaDaLoja(AQuery, ADados.Loja);
 
     //Inclusão tela de Pedidos.... INSERT INTO OE
     ObsCabecalho := MontarTextoObs(ADados.CamposObs);
@@ -517,10 +542,11 @@ begin
       AQuery.Close;
       AQuery.SQL.Text :=
         'INSERT INTO IOE (DATA, ID_OE, ID_ITEM, COD, CODIGODEBARRAS, ' +
-        'TAMANHO, QUANT, PRECODEVENDA, VALOR, VCON, LBRU, OBS) ' +
+        'TAMANHO, QUANT, PRECODEVENDA, VALOR, VCON, LBRU, OBS, LOJAENTR) ' +
         'VALUES (CURRENT_DATE, :ID_OE, :ID_ITEM, :COD, :CODIGODEBARRAS, ' +
-        ':TAMANHO, :QUANT, :PRECODEVENDA, :VALOR, :VCON, :LBRU, :OBS)';
+        ':TAMANHO, :QUANT, :PRECODEVENDA, :VALOR, :VCON, :LBRU, :OBS, :LOJAENTR)';
       AQuery.ParamByName('ID_OE').AsInteger := CodOE;
+      AQuery.ParamByName('LOJAENTR').AsInteger := LojaEntrega;
       AQuery.ParamByName('ID_ITEM').AsInteger := ProximoIdItem;
       Inc(ProximoIdItem);
       if CodProdutoItem <> 0 then
