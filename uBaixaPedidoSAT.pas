@@ -119,7 +119,10 @@ type
     CpfCliente: string;                 // buyer_cpf_id -> cli.cpf (se achar CPF ja cadastrado, atualiza; senao insere)
     TelefoneEntrega: string;            // recipient_address.phone -> cli.telr
     EnderecoEntrega: string;            // recipient_address (rua+numero+bairro montado) -> cli.endr
+    BairroEntrega: string;              // bairro do endereco de entrega -> cli.BAIR (varchar 20)
     CidadeEntrega: string;              // recipient_address.city -> cli.cidr
+                                        // (e usada pra achar o codigo IBGE do
+                                        // municipio -> cli.IBGECODIGODOMUNICIPIO)
     EstadoEntrega: string;              // recipient_address.state -> cli.estr
     CepEntrega: string;                 // recipient_address.zipcode -> cli.cepr
     PaisEntrega: string;                // recipient_address.country -> cli.pais
@@ -215,6 +218,73 @@ begin
   end;
 end;
 
+// Monta o padrao LIKE pra achar a cidade na tabela CIDADES, que guarda o
+// nome sem acento e em maiusculo ("SAO PAULO") - o marketplace manda "São
+// Paulo". Apostrofo e hifen viram "_" (qualquer caractere): a CIDADES grava
+// "SANTA BARBARA D?OESTE" com um apostrofo diferente do ' que vem da API, e
+// hifen/espaco aparecem trocados de um lado pro outro ("EMBU-GUACU").
+function PadraoNomeCidade(const ACidade: string): string;
+const
+  COM_ACENTO = 'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ';
+  SEM_ACENTO = 'AAAAAEEEEIIIIOOOOOUUUUCN';
+  CORINGA = '''’´`-';
+var
+  I, P: Integer;
+begin
+  Result := AnsiUpperCase(Trim(ACidade));
+  for I := 1 to Length(Result) do
+  begin
+    P := Pos(Result[I], COM_ACENTO);
+    if P > 0 then
+      Result[I] := SEM_ACENTO[P]
+    else if Pos(Result[I], CORINGA) > 0 then
+      Result[I] := '_';
+  end;
+end;
+
+// Codigo IBGE do municipio pela tabela CIDADES (cidade + UF). Devolve 0
+// quando nao acha - o chamador grava NULL nesse caso. A tabela CEPS teria o
+// codigo por CEP, mas vem vazia, entao a busca e' pelo nome.
+function BuscarCodigoIBGE(AQuery: TFDQuery; const ACidade, AUF: string): Integer;
+begin
+  Result := 0;
+  if (Trim(ACidade) = '') or (Trim(AUF) = '') then
+    Exit;
+  AQuery.Close;
+  AQuery.SQL.Text :=
+    'SELECT FIRST 1 CODIGOMUNICIPIODOIBGE FROM CIDADES ' +
+    'WHERE ESTADO = :ESTADO AND UPPER(CIDADE) LIKE :CIDADE';
+  AQuery.ParamByName('ESTADO').AsString := UpperCase(Trim(AUF));
+  AQuery.ParamByName('CIDADE').AsString := PadraoNomeCidade(ACidade);
+  AQuery.Open;
+  try
+    if not AQuery.IsEmpty then
+      Result := AQuery.FieldByName('CODIGOMUNICIPIODOIBGE').AsInteger;
+  finally
+    AQuery.Close;
+  end;
+end;
+
+// Parametros BAIR e IBGE do INSERT/UPDATE da CLI - vazio/0 vira NULL.
+procedure DefinirBairroEIBGE(AQuery: TFDQuery; const ABairro: string;
+  ACodIBGE: Integer);
+begin
+  if ABairro <> '' then
+    AQuery.ParamByName('BAIR').AsString := ABairro
+  else
+  begin
+    AQuery.ParamByName('BAIR').DataType := ftString;
+    AQuery.ParamByName('BAIR').Clear;
+  end;
+  if ACodIBGE <> 0 then
+    AQuery.ParamByName('IBGE').AsInteger := ACodIBGE
+  else
+  begin
+    AQuery.ParamByName('IBGE').DataType := ftInteger;
+    AQuery.ParamByName('IBGE').Clear;
+  end;
+end;
+
 // Busca o cliente pelo CPF; se achar, devolve o CODCLI existente
 // (atualizando nome/endereco); se nao achar, insere um novo e devolve o
 // CODCLI recem-criado. {ATENCAO} nomes de tabela/campo (CLI, cli.codcli,
@@ -227,9 +297,15 @@ end;
 function BuscarOuCriarCliente(AQuery: TFDQuery; const ADados: TDadosPedidoSAT): Integer;
 var
   TemCpf: Boolean;
+  CodIBGE: Integer;
+  Bairro: string;
 begin
   Result := 0;
   TemCpf := Trim(ADados.CpfCliente) <> '';
+  // Pedido do cliente 28/10/2026: preencher codigo IBGE do municipio e
+  // bairro. CLI.BAIR e' VARCHAR(20) - corta pra nao estourar a coluna.
+  CodIBGE := BuscarCodigoIBGE(AQuery, ADados.CidadeEntrega, ADados.EstadoEntrega);
+  Bairro := Copy(Trim(ADados.BairroEntrega), 1, 20);
 
   // {DECISAO DO CLIENTE - 30/08/2026} Marketplace que nao devolve CPF
   // (Amazon e TikTok Shop) NAO fica mais sem cliente: o cliente e' criado
@@ -257,10 +333,15 @@ begin
         // Cliente ja existe - atualiza nome/endereco com os dados mais
         // recentes vindos do pedido (o comprador pode ter mudado endereco
         // de entrega desde a ultima compra).
+        // Bairro e IBGE: quando o pedido nao traz (NULL), mantem o que ja
+        // estava no cadastro em vez de apagar.
         AQuery.SQL.Text :=
           'UPDATE CLI SET CLI = :CLI, TELR = :TELR, ENDR = :ENDR, ' +
-          'CIDR = :CIDR, ESTR = :ESTR, CEPR = :CEPR, PAIS = :PAIS ' +
+          'CIDR = :CIDR, ESTR = :ESTR, CEPR = :CEPR, PAIS = :PAIS, ' +
+          'BAIR = COALESCE(CAST(:BAIR AS VARCHAR(20)), BAIR), ' +
+          'IBGECODIGODOMUNICIPIO = COALESCE(CAST(:IBGE AS INTEGER), IBGECODIGODOMUNICIPIO) ' +
           'WHERE CODCLI = :CODCLI';
+        DefinirBairroEIBGE(AQuery, Bairro, CodIBGE);
         AQuery.ParamByName('CLI').AsString := ADados.NomeCliente;
         AQuery.ParamByName('TELR').AsString := ADados.TelefoneEntrega;
         AQuery.ParamByName('ENDR').AsString := ADados.EnderecoEntrega;
@@ -287,9 +368,12 @@ begin
   AQuery.Close;
 
   AQuery.SQL.Text :=
-    'INSERT INTO CLI (CODCLI, CLI, CPF, TELR, ENDR, CIDR, ESTR, CEPR, PAIS) ' +
-    'VALUES (:CODCLI, :CLI, :CPF, :TELR, :ENDR, :CIDR, :ESTR, :CEPR, :PAIS)';
+    'INSERT INTO CLI (CODCLI, CLI, CPF, TELR, ENDR, CIDR, ESTR, CEPR, PAIS, ' +
+    'BAIR, IBGECODIGODOMUNICIPIO) ' +
+    'VALUES (:CODCLI, :CLI, :CPF, :TELR, :ENDR, :CIDR, :ESTR, :CEPR, :PAIS, ' +
+    ':BAIR, :IBGE)';
   AQuery.ParamByName('CODCLI').AsInteger := Result;
+  DefinirBairroEIBGE(AQuery, Bairro, CodIBGE);
   AQuery.ParamByName('CLI').AsString := ADados.NomeCliente;
   // {ATENCAO} sem CPF grava NULL, nao string vazia: Clear e' o que zera o
   // parametro pra nulo no FireDAC. String vazia criaria um ''valor'' que
@@ -365,6 +449,12 @@ begin
     if AQuery.IsEmpty then
       raise Exception.Create('Loja ' + ALoja.ToString + ' nao encontrada.');
     Result := AQuery.FieldByName('MARKETPLACE_FORMADEPGTO').AsInteger;
+    // Antes passava com 0 e o pagamento ficava sem codigo/descricao na
+    // tela de pedidos do SAT (visto no cliente em 27/10/2026).
+    if Result = 0 then
+      raise Exception.Create('Loja ' + ALoja.ToString + ' sem forma de pagamento ' +
+        'de marketplace configurada (LOJAS.MARKETPLACE_FORMADEPGTO). Configure ' +
+        'no cadastro da loja e baixe o pedido de novo.');
   finally
     AQuery.Close;
   end;
@@ -570,9 +660,12 @@ begin
     //Inclusão do pagamentos... INSERT INTO PGTOS
     AQuery.Close;
     AQuery.SQL.Text :=
-      'INSERT INTO PGTOS (DATA, ID_OE, ID_PG, ENT, VALOR_CON, VALOR_PG) ' +
-      'VALUES (CURRENT_DATE, :ID_OE, 1, :ENT, :VALOR_CON, :VALOR_PG)';
+      'INSERT INTO PGTOS (DATA, ID_OE, ID_PG, ENT, VALOR_CON, VALOR_PG, NOME) ' +
+      'VALUES (CURRENT_DATE, :ID_OE, 1, :ENT, :VALOR_CON, :VALOR_PG, :NOME)';
     AQuery.ParamByName('ID_OE').AsInteger := CodOE;
+    // Nome do cliente no pagamento (pedido do cliente 28/10/2026) - coluna
+    // VARCHAR(50).
+    AQuery.ParamByName('NOME').AsString := Copy(ADados.NomeCliente, 1, 50);
     AQuery.ParamByName('ENT').AsInteger := FormaDePgto;
     AQuery.ParamByName('VALOR_CON').AsFloat := ADados.ValorRepasse;
     AQuery.ParamByName('VALOR_PG').AsFloat := ADados.ValorRepasse;

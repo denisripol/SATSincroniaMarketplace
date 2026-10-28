@@ -202,6 +202,11 @@ type
 
     function StatusEnvioMercadoLivre(ALinha: Integer): string;
 
+    procedure PreencherSituacaoPedidos;
+
+    function DescreverSituacaoPedido(const AStatus, AStatusEnvio: string;
+      out AProximoPasso: string): string;
+
     procedure CarregarPedidosTikTokShop;
 
     procedure AtualizarEstadoBotoes(const ALinha: Integer = -1);
@@ -242,6 +247,14 @@ implementation
 
 
 {$R *.dfm}
+
+
+
+const
+
+  // Coluna da grade com o significado do status e o proximo passo.
+
+  COL_SITUACAO = 4;
 
 
 
@@ -309,7 +322,7 @@ procedure TFrmPedidosMarketplace.FormCreate(Sender: TObject);
 
 begin
 
-  Grid.ColCount := 4;
+  Grid.ColCount := 5;
 
   Grid.RowCount := 2; // FixedRows precisa ser sempre < RowCount
 
@@ -322,6 +335,26 @@ begin
   Grid.Cells[2, 0] := 'Data';
 
   Grid.Cells[3, 0] := 'Total';
+
+  // Coluna 4: o que o status quer dizer e o proximo passo (pedido do
+
+  // cliente 28/10/2026) - preenchida em PreencherSituacaoPedidos. A tela
+
+  // cresce pra caber o texto.
+
+  Grid.Cells[COL_SITUACAO, 0] := 'Situação / próximo passo';
+
+  Grid.ColWidths[0] := 150;
+
+  Grid.ColWidths[1] := 170;
+
+  Grid.ColWidths[2] := 120;
+
+  Grid.ColWidths[3] := 100;
+
+  Grid.ColWidths[COL_SITUACAO] := 560;
+
+  ClientWidth := 1130;
 
 
 
@@ -392,6 +425,8 @@ begin
     Log('Gestao de pedidos ainda nao implementada para este marketplace.');
 
   end;
+
+  PreencherSituacaoPedidos;
 
   // Lista recarregada: reavalia os botoes sem depender de um clique do usuario.
 
@@ -1013,6 +1048,189 @@ begin
     Result := FMercadoLivreOrders[ALinha - 1].ShippingStatus;
 end;
 
+const
+  PASSO_BAIXAR = 'Baixar Pedido SAT';
+
+// Traduz o status do marketplace em "o que significa" (retorno) e "o que
+// fazer agora" (AProximoPasso, vazio quando nao ha nada a fazer). No Mercado
+// Livre AStatus e' o status do PEDIDO e AStatusEnvio o do envio; nos demais
+// AStatusEnvio vem vazio. Os passos que levam a PASSO_BAIXAR batem com
+// StatusIndicaDespachado - se mudar um, mudar o outro.
+function TFrmPedidosMarketplace.DescreverSituacaoPedido(const AStatus,
+  AStatusEnvio: string; out AProximoPasso: string): string;
+var
+  Significado, Passo: string;
+
+  procedure Definir(const ASignificado, APasso: string);
+  begin
+    Significado := ASignificado;
+    Passo := APasso;
+  end;
+
+begin
+  Significado := '';
+  Passo := '';
+  case TMarketplaces(FCodMarketplace) of
+    TMarketplaces.Shopee:
+      case IndexText(AStatus, ['UNPAID', 'READY_TO_SHIP', 'PROCESSED', 'RETRY_SHIP',
+        'SHIPPED', 'TO_CONFIRM_RECEIVE', 'IN_CANCEL', 'CANCELLED', 'TO_RETURN',
+        'COMPLETED']) of
+        0: Definir('Aguardando o pagamento do comprador', 'aguardar');
+        1: Definir('Pago, pronto para despachar', 'Despachar');
+        2: Definir('Envio organizado e etiqueta gerada, aguardando a transportadora coletar',
+             'imprimir a etiqueta e aguardar a coleta');
+        3: Definir('A coleta não aconteceu e o envio precisa ser organizado de novo',
+             'Despachar novamente');
+        4: Definir('Coletado pela transportadora, a caminho do comprador', PASSO_BAIXAR);
+        5: Definir('Entregue, aguardando o comprador confirmar o recebimento', PASSO_BAIXAR);
+        6: Definir('O comprador pediu o cancelamento', 'Aprovar ou Reprovar o cancelamento');
+        7: Definir('Cancelado', '');
+        8: Definir('O comprador pediu devolução', 'tratar a devolução no Seller Centre da Shopee');
+        9: Definir('Concluído', PASSO_BAIXAR);
+      end;
+
+    TMarketplaces.Amazon:
+      case IndexText(AStatus, ['Pending', 'PendingAvailability', 'Unshipped',
+        'PartiallyShipped', 'Shipped', 'InvoiceUnconfirmed', 'Canceled',
+        'Unfulfillable']) of
+        0, 1: Definir('Pagamento ainda em análise pela Amazon', 'aguardar');
+        2: Definir('Pago, aguardando envio', 'Despachar');
+        3: Definir('Parte dos itens já foi enviada', 'Despachar os itens restantes');
+        4: Definir('Enviado', PASSO_BAIXAR);
+        5: Definir('Enviado, com a nota fiscal ainda não confirmada pela Amazon', PASSO_BAIXAR);
+        6: Definir('Cancelado', '');
+        7: Definir('A Amazon não consegue atender este pedido', '');
+      end;
+
+    TMarketplaces.Magalu:
+      // {NAO CONFIRMADO} nomes de status do Magalu ainda nao vistos num
+      // pedido real - os mesmos palpites usados em StatusIndicaDespachado.
+      case IndexText(AStatus, ['NEW', 'CREATED', 'APPROVED', 'INVOICED', 'SHIPPED',
+        'DELIVERED', 'CANCELED', 'CANCELLED']) of
+        0, 1: Definir('Criado, aguardando a aprovação do pagamento', 'aguardar');
+        2: Definir('Pago, aguardando nota fiscal e envio', 'enviar a NF e depois Despachar');
+        3: Definir('Nota fiscal enviada', 'Despachar');
+        4: Definir('Enviado', PASSO_BAIXAR);
+        5: Definir('Entregue', PASSO_BAIXAR);
+        6, 7: Definir('Cancelado', '');
+      end;
+
+    TMarketplaces.MercadoLivre:
+      case IndexText(AStatus, ['cancelled', 'payment_required', 'payment_in_process',
+        'partially_paid', 'pending_cancel', 'paid', 'partially_refunded']) of
+        0: Definir('Cancelado', '');
+        1, 2, 3: Definir('Aguardando a confirmação do pagamento', 'aguardar');
+        4: Definir('Cancelamento em andamento', '');
+        5, 6:
+          case IndexText(AStatusEnvio, ['pending', 'handling', 'ready_to_ship',
+            'shipped', 'delivered', 'not_delivered', 'cancelled']) of
+            0: Definir('Pago, envio ainda sendo preparado pelo Mercado Livre', 'aguardar');
+            1: Definir('Pago, aguardando o vendedor preparar o pacote',
+                 'imprimir a etiqueta e preparar o envio');
+            2: Definir('Etiqueta pronta, aguardando postagem ou coleta',
+                 'postar ou aguardar a coleta');
+            3: Definir('A caminho do comprador', PASSO_BAIXAR);
+            4: Definir('Entregue', PASSO_BAIXAR);
+            5: Definir('Saiu mas não foi entregue (devolução ou extravio)',
+                 'conferir no portal do Mercado Livre');
+            6: Definir('Envio cancelado', 'conferir no portal do Mercado Livre');
+          else
+            // Sem envio pelo ML ("a combinar") ou consulta do envio falhou.
+            Definir('Pago, sem status de envio do Mercado Livre (entrega a combinar ' +
+              'ou envio não consultado)', 'conferir no portal do Mercado Livre');
+          end;
+      end;
+
+    TMarketplaces.TikTokShop:
+      case IndexText(AStatus, ['UNPAID', 'ON_HOLD', 'AWAITING_SHIPMENT',
+        'PARTIALLY_SHIPPING', 'AWAITING_COLLECTION', 'IN_TRANSIT', 'DELIVERED',
+        'COMPLETED', 'CANCELLED']) of
+        0: Definir('Aguardando o pagamento do comprador', 'aguardar');
+        1: Definir('Pago, no período em que o comprador ainda pode cancelar', 'aguardar');
+        2: Definir('Pago, aguardando envio', 'Despachar');
+        3: Definir('Parte dos itens já foi enviada', 'Despachar os itens restantes');
+        4: Definir('Pacote pronto, aguardando a transportadora coletar', 'aguardar a coleta');
+        5: Definir('A caminho do comprador', PASSO_BAIXAR);
+        6: Definir('Entregue', PASSO_BAIXAR);
+        7: Definir('Concluído', PASSO_BAIXAR);
+        8: Definir('Cancelado', '');
+      end;
+  end;
+  if Significado = '' then
+    Significado := 'Status sem descrição cadastrada';
+  Result := Significado;
+  AProximoPasso := Passo;
+end;
+
+// Preenche a coluna "Situacao / proximo passo" de todas as linhas. Tambem
+// confere em MARKETPLACE_PEDIDOS se o pedido ja foi baixado, pra nao mandar
+// o usuario baixar de novo. Falha nessa conferencia nao derruba a listagem.
+procedure TFrmPedidosMarketplace.PreencherSituacaoPedidos;
+var
+  Qry: TFDQuery;
+  Linha: Integer;
+  OrderSN, Status, StatusEnvio, Situacao, ProximoPasso: string;
+  ConferirBaixa, JaBaixado: Boolean;
+begin
+  Qry := TFDQuery.Create(nil);
+  try
+    Qry.Connection := DZ.ZDatabase;
+    ConferirBaixa := True;
+    for Linha := 1 to Grid.RowCount - 1 do
+    begin
+      OrderSN := Trim(Grid.Cells[0, Linha]);
+      if OrderSN = '' then
+      begin
+        Grid.Cells[COL_SITUACAO, Linha] := '';
+        Continue;
+      end;
+
+      // No Mercado Livre a coluna Status mostra "paid (envio: shipped)" - os
+      // dois status separados vem do array.
+      StatusEnvio := '';
+      if TMarketplaces(FCodMarketplace) = TMarketplaces.MercadoLivre then
+      begin
+        Status := '';
+        if (Linha - 1 <= High(FMercadoLivreOrders)) and
+           (FMercadoLivreOrders[Linha - 1].OrderId = OrderSN) then
+          Status := FMercadoLivreOrders[Linha - 1].Status;
+        StatusEnvio := StatusEnvioMercadoLivre(Linha);
+      end
+      else
+        Status := Grid.Cells[1, Linha];
+
+      Situacao := DescreverSituacaoPedido(Status, StatusEnvio, ProximoPasso);
+
+      JaBaixado := False;
+      if ConferirBaixa then
+        try
+          JaBaixado := PedidoJaBaixado(Qry, FLoja, FCodMarketplace, OrderSN);
+        except
+          on E: Exception do
+          begin
+            ConferirBaixa := False;
+            Log('Aviso: nao foi possivel conferir quais pedidos ja foram baixados ' +
+              'no SAT (' + E.Message + ').');
+          end;
+        end;
+
+      if JaBaixado then
+      begin
+        if ProximoPasso = PASSO_BAIXAR then
+          ProximoPasso := 'nenhum, já baixado no SAT'
+        else
+          Situacao := Situacao + ' (já baixado no SAT)';
+      end;
+
+      if ProximoPasso <> '' then
+        Situacao := Situacao + '. Próximo passo: ' + ProximoPasso;
+      Grid.Cells[COL_SITUACAO, Linha] := Situacao;
+    end;
+  finally
+    Qry.Free;
+  end;
+end;
+
 
 
 // Reavalia quais botoes de acao ficam habilitados, conforme o marketplace e o
@@ -1257,9 +1475,13 @@ begin
 
     TMarketplaces.Shopee:
 
-      // SHIPPED = despachado; COMPLETED = ja foi alem (entregue/concluido).
+      // SHIPPED = despachado; TO_CONFIRM_RECEIVE (entregue, aguardando o
 
-      Result := SameText(AStatus, 'SHIPPED') or SameText(AStatus, 'COMPLETED');
+      // comprador confirmar) e COMPLETED = ja foi alem.
+
+      Result := SameText(AStatus, 'SHIPPED') or SameText(AStatus, 'TO_CONFIRM_RECEIVE') or
+
+        SameText(AStatus, 'COMPLETED');
 
     TMarketplaces.Amazon:
 
@@ -1267,7 +1489,9 @@ begin
 
       // "SHIPPED") - SameText ja cobre isso sem se importar com caixa.
 
-      Result := SameText(AStatus, 'Shipped');
+      // InvoiceUnconfirmed = ja enviado, so' falta a Amazon confirmar a NF.
+
+      Result := SameText(AStatus, 'Shipped') or SameText(AStatus, 'InvoiceUnconfirmed');
 
     TMarketplaces.Magalu:
 
@@ -3839,13 +4063,27 @@ begin
 
     ADados.CodClienteMarketplace := Detalhe.BuyerUserID;
 
-    ADados.NomeCliente := Detalhe.BuyerUsername;
+    // Nome do destinatario (nome real) no lugar do usuario da Shopee (ex.:
+
+    // "local_regress.br"), pedido do cliente 28/10/2026. O usuario so' entra
+
+    // quando o nome nao vem ou vem mascarado com "*".
+
+    if (Trim(Detalhe.RecipientName) <> '') and (Pos('*', Detalhe.RecipientName) = 0) then
+
+      ADados.NomeCliente := Trim(Detalhe.RecipientName)
+
+    else
+
+      ADados.NomeCliente := Detalhe.BuyerUsername;
 
     ADados.CpfCliente := Detalhe.BuyerCpfId;
 
     ADados.TelefoneEntrega := Detalhe.RecipientPhone;
 
     ADados.EnderecoEntrega := Detalhe.RecipientFullAddress;
+
+    ADados.BairroEntrega := Detalhe.RecipientDistrict;
 
     ADados.CidadeEntrega := Detalhe.RecipientCity;
 
@@ -4081,6 +4319,8 @@ begin
 
     ADados.EnderecoEntrega := Detalhe.ShippingAddressLine;
 
+    ADados.BairroEntrega := Detalhe.ShippingDistrict;
+
     ADados.CidadeEntrega := Detalhe.ShippingCity;
 
     ADados.EstadoEntrega := NormalizarUF(Detalhe.ShippingState);
@@ -4252,6 +4492,8 @@ begin
       IfThen(Detalhe.ShippingComplement <> '', ' - ' + Detalhe.ShippingComplement, '') +
 
       IfThen(Detalhe.ShippingNeighborhood <> '', ', ' + Detalhe.ShippingNeighborhood, ''));
+
+    ADados.BairroEntrega := Detalhe.ShippingNeighborhood;
 
     ADados.CidadeEntrega := Detalhe.ShippingCity;
 
@@ -4473,6 +4715,7 @@ begin
         ADados.EnderecoEntrega := ADados.EnderecoEntrega + ' - ' + Envio.Complemento;
       if Trim(Envio.Bairro) <> '' then
         ADados.EnderecoEntrega := ADados.EnderecoEntrega + ', ' + Envio.Bairro;
+      ADados.BairroEntrega := Envio.Bairro;
       ADados.CidadeEntrega := Envio.Cidade;
       ADados.EstadoEntrega := NormalizarUF(Envio.Estado);
       ADados.CepEntrega := Envio.Cep;
@@ -4491,6 +4734,7 @@ begin
         ADados.EnderecoEntrega := ADados.EnderecoEntrega + ' - ' + Billing.Complemento;
       if Trim(Billing.Bairro) <> '' then
         ADados.EnderecoEntrega := ADados.EnderecoEntrega + ', ' + Billing.Bairro;
+      ADados.BairroEntrega := Billing.Bairro;
       ADados.CidadeEntrega := Billing.Cidade;
       ADados.EstadoEntrega := NormalizarUF(Billing.Estado);
       ADados.CepEntrega := Billing.Cep;
@@ -4722,6 +4966,7 @@ begin
     ADados.EnderecoEntrega := Detalhe.EnderecoLinha;
     if Trim(Detalhe.Bairro) <> '' then
       ADados.EnderecoEntrega := Trim(ADados.EnderecoEntrega + ', ' + Detalhe.Bairro);
+    ADados.BairroEntrega := Detalhe.Bairro;
     ADados.CidadeEntrega := Detalhe.Cidade;
     ADados.EstadoEntrega := NormalizarUF(Detalhe.Estado);
     ADados.CepEntrega := Detalhe.Cep;
