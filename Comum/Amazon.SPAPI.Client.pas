@@ -110,6 +110,9 @@ type
     ShippingPhone: string;
     ShippingAddressLine: string; // AddressLine1+2+3 concatenados
     ShippingCity: string;
+    ShippingDistrict: string;    // ShippingAddress.District (bairro) - {NAO
+                                 // CONFIRMADO} se a Amazon BR preenche;
+                                 // fica vazio quando nao vem
     ShippingState: string;
     ShippingPostalCode: string;
     ShippingCountryCode: string;
@@ -960,6 +963,7 @@ begin
       AddressObj.TryGetValue<string>('Name', ADetalhe.ShippingName);
       AddressObj.TryGetValue<string>('Phone', ADetalhe.ShippingPhone);
       AddressObj.TryGetValue<string>('City', ADetalhe.ShippingCity);
+      AddressObj.TryGetValue<string>('District', ADetalhe.ShippingDistrict);
       AddressObj.TryGetValue<string>('StateOrRegion', ADetalhe.ShippingState);
       AddressObj.TryGetValue<string>('PostalCode', ADetalhe.ShippingPostalCode);
       AddressObj.TryGetValue<string>('CountryCode', ADetalhe.ShippingCountryCode);

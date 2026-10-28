@@ -118,6 +118,7 @@ type
     RecipientPhone: string;
     RecipientFullAddress: string; // full_address (ja vem pronto da Shopee)
     RecipientCity: string;
+    RecipientDistrict: string;    // recipient_address.district (bairro, no Brasil)
     RecipientState: string;
     RecipientZipcode: string;
     RecipientCountry: string;
@@ -2194,6 +2195,9 @@ begin
       AddressObj.TryGetValue<string>('phone', ADetalhe.RecipientPhone);
       AddressObj.TryGetValue<string>('full_address', ADetalhe.RecipientFullAddress);
       AddressObj.TryGetValue<string>('city', ADetalhe.RecipientCity);
+      // {NAO CONFIRMADO} no Brasil o "district" deve ser o bairro - conferir
+      // num pedido real. Leitura defensiva: fica vazio se nao vier.
+      AddressObj.TryGetValue<string>('district', ADetalhe.RecipientDistrict);
       AddressObj.TryGetValue<string>('state', ADetalhe.RecipientState);
       AddressObj.TryGetValue<string>('zipcode', ADetalhe.RecipientZipcode);
       AddressObj.TryGetValue<string>('country', ADetalhe.RecipientCountry);
