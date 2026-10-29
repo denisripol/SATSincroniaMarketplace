@@ -113,7 +113,7 @@ type
     FreteReal: Double;                  // frete pago pelo comprador (Shopee: buyer_paid_shipping_fee do escrow) -> oe.frete
     Transportadora: string;             // shipping_carrier -> oe.MOTIVO_E ({ATENCAO} pedido do cliente: aumentar tamanho do campo no banco)
     DataColeta: TDateTime;              // pickup_done_time -> oe.data_ent
-    ValorRepasse: Double;               // escrow_amount (get_escrow_detail) -> pgtos.VALOR_CON / pgtos.VALOR_PG
+    ValorRepasse: Double;               // liquido do marketplace (Shopee: escrow_amount) -> so' oe.obs; pgtos usa itens + frete
 
     // --- Cliente (upsert por CPF) ---
     CodClienteMarketplace: string;      // buyer_user_id (id do comprador na Shopee, so' referencia)
@@ -528,7 +528,7 @@ var
   CodProdutoItem: Integer;
   CustoItem: Double;
   VConItem, LBruItem: Double;
-  SomaLBruto, SomaTotal, SomaValorCon: Double;
+  SomaLBruto, SomaTotal, SomaValorCon, ValorPagamento: Double;
   ObsCabecalho: string;
   FormaDePgto: Integer;
   LojaEntrega: Integer;
@@ -593,7 +593,11 @@ begin
     LojaEntrega := BuscarLojaEntregaDaLoja(AQuery, ADados.Loja);
 
     //Inclusão tela de Pedidos.... INSERT INTO OE
-    ObsCabecalho := MontarTextoObs(ADados.CamposObs);
+    // Repasse liquido do marketplace so' como informacao no OBS - o
+    // pagamento (PGTOS) e' gravado com o valor da venda, ver abaixo.
+    ObsCabecalho := MontarTextoObs(ADados.CamposObs +
+      [TCampoObs.Create('Repasse do marketplace (liquido)',
+        FormatFloat('0.00', ADados.ValorRepasse))]);
     AQuery.Close;
     AQuery.SQL.Text :=
       'INSERT INTO OE (DATA, XPED, MARKETPLACE_STATUS, HORA, ' +
@@ -719,8 +723,16 @@ begin
     // VARCHAR(50).
     AQuery.ParamByName('NOME').AsString := Copy(ADados.NomeCliente, 1, 50);
     AQuery.ParamByName('ENT').AsInteger := FormaDePgto;
-    AQuery.ParamByName('VALOR_CON').AsFloat := ADados.ValorRepasse;
-    AQuery.ParamByName('VALOR_PG').AsFloat := ADados.ValorRepasse;
+    // Pagamento = valor da VENDA (itens + frete), igual pra todos os
+    // marketplaces (29/10/2026). {ATENCAO} nao usar ValorRepasse aqui: a
+    // VENDA_EMITIR_251103A exige SUM(PGTOS.VALOR_PG) = OE.TOTAL + OE.FRETE
+    // (- desconto etc., todos 0 na baixa), senao devolve retorno 8. E o
+    // repasse muda de marketplace pra marketplace - no TikTok ja vem com o
+    // frete, na Shopee sem, e com tarifas descontadas o valor nunca fecha
+    // com o pedido. O repasse vai pro OBS da OE, so' como informacao.
+    ValorPagamento := SomaTotal + ADados.FreteReal;
+    AQuery.ParamByName('VALOR_CON').AsFloat := ValorPagamento;
+    AQuery.ParamByName('VALOR_PG').AsFloat := ValorPagamento;
     AQuery.ExecSQL;
 
     // Emite a venda em cima da OE recem-criada. A procedure tem RETURNS
