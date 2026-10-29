@@ -72,7 +72,9 @@ type
     ItemIdMarketplace: string;    // item_id - so usado pra localizar
                                     // PRODUTOS_MARKETPLACE.CODPRODUTO (vira
                                     // ioe.cod via lookup, nao e' gravado direto)
-    CodigoDeBarras: string;       // item_sku -> ioe.CODIGODEBARRAS
+    CodigoDeBarras: string;       // item_sku (SKU do anuncio) - so' referencia:
+                                    // desde 29/10/2026 ioe.CODIGODEBARRAS vem
+                                    // de PROD.CODIND (ver BuscarDadosProduto)
     IdItemPedido: string;         // order_item_id -> ioe.OBS ({CORRECAO
                                     // 24/08} ioe.id_item NAO e' auto-
                                     // incremento (confirmado pelo cliente
@@ -433,6 +435,39 @@ begin
   end;
 end;
 
+// Dados do produto do SAT que vao pro item (IOE), pedido do cliente
+// 29/10/2026: custo (PCIF, pro Lucro Bruto), codigo de barras (CODIND - e'
+// de onde a tela de pedidos do SAT tira) e quantidade da embalagem
+// (QTDE_EMBALAGEM; NULL no cadastro vira 1, venda por unidade). Produto nao
+// vinculado (ACodProduto = 0) devolve custo 0, codigo de barras vazio e
+// embalagem 1.
+procedure BuscarDadosProduto(AQuery: TFDQuery; const ACodProduto: Integer;
+  out ACusto: Double; out ACodigoDeBarras: string; out AQtdeEmbalagem: Double);
+begin
+  ACusto := 0;
+  ACodigoDeBarras := '';
+  AQtdeEmbalagem := 1;
+  if ACodProduto = 0 then
+    Exit;
+  AQuery.Close;
+  AQuery.SQL.Text :=
+    'SELECT PCIF, CODIND, QTDE_EMBALAGEM FROM PROD WHERE COD = :CODPRODUTO';
+  AQuery.ParamByName('CODPRODUTO').AsInteger := ACodProduto;
+  AQuery.Open;
+  try
+    if not AQuery.IsEmpty then
+    begin
+      ACusto := AQuery.FieldByName('PCIF').AsFloat;
+      ACodigoDeBarras := Trim(AQuery.FieldByName('CODIND').AsString);
+      if not AQuery.FieldByName('QTDE_EMBALAGEM').IsNull and
+         (AQuery.FieldByName('QTDE_EMBALAGEM').AsFloat > 0) then
+        AQtdeEmbalagem := AQuery.FieldByName('QTDE_EMBALAGEM').AsFloat;
+    end;
+  finally
+    AQuery.Close;
+  end;
+end;
+
 // Busca o codigo da forma de pagamento configurado na loja
 // (LOJAS.MARKETPLACE_FORMADEPGTO) - usado em pgtos.ent. Campo criado pelo
 // cliente em 28/08/2026.
@@ -498,6 +533,8 @@ var
   FormaDePgto: Integer;
   LojaEntrega: Integer;
   ProximoIdItem: Integer;
+  CodigoDeBarrasItem: string;
+  QtdeEmbalagemItem: Double;
 begin
   Result := False;
   AErrorMessage := '';
@@ -625,16 +662,28 @@ begin
     begin
       CodProdutoItem := BuscarCodProdutoPeloItem(AQuery, ADados.CodMarketplace,
         ADados.Itens[I].ItemIdMarketplace);
-      CustoItem := BuscarCustoProduto(AQuery, CodProdutoItem);
+      BuscarDadosProduto(AQuery, CodProdutoItem, CustoItem, CodigoDeBarrasItem,
+        QtdeEmbalagemItem);
       VConItem := ADados.Itens[I].Valor * ADados.Itens[I].Quantidade;
       LBruItem := (ADados.Itens[I].Valor - CustoItem) * ADados.Itens[I].Quantidade;
 
       AQuery.Close;
       AQuery.SQL.Text :=
         'INSERT INTO IOE (DATA, ID_OE, ID_ITEM, COD, CODIGODEBARRAS, ' +
-        'TAMANHO, QUANT, PRECODEVENDA, VALOR, VCON, LBRU, OBS, LOJAENTR) ' +
+        'TAMANHO, QUANT, PRECODEVENDA, VALOR, VCON, LBRU, OBS, LOJAENTR, ' +
+        'QUANT_EMBALAGEM, PRECODECUSTO, VALORTOTAL) ' +
         'VALUES (CURRENT_DATE, :ID_OE, :ID_ITEM, :COD, :CODIGODEBARRAS, ' +
-        ':TAMANHO, :QUANT, :PRECODEVENDA, :VALOR, :VCON, :LBRU, :OBS, :LOJAENTR)';
+        ':TAMANHO, :QUANT, :PRECODEVENDA, :VALOR, :VCON, :LBRU, :OBS, :LOJAENTR, ' +
+        ':QUANT_EMBALAGEM, :PRECODECUSTO, :VALORTOTAL)';
+      AQuery.ParamByName('QUANT_EMBALAGEM').AsFloat := QtdeEmbalagemItem;
+      // Regra da tela de pedidos do SAT (retorno do cliente 29/10/2026):
+      //   LBRU = Total do item - (Quantidade x Preco de Custo)
+      //   PRECODECUSTO = PROD.PCIF
+      //   Total de custo (calculado pela tela) = VCON - LBRU
+      // Sem PRECODECUSTO e VALORTOTAL a tela mostrava Lucro Bruto = 0 - custo.
+      // VALORTOTAL = valor x quantidade, o mesmo que VCON.
+      AQuery.ParamByName('PRECODECUSTO').AsFloat := CustoItem;
+      AQuery.ParamByName('VALORTOTAL').AsFloat := VConItem;
       AQuery.ParamByName('ID_OE').AsInteger := CodOE;
       AQuery.ParamByName('LOJAENTR').AsInteger := LojaEntrega;
       AQuery.ParamByName('ID_ITEM').AsInteger := ProximoIdItem;
@@ -643,7 +692,10 @@ begin
         AQuery.ParamByName('COD').AsInteger := CodProdutoItem
       else
         AQuery.ParamByName('COD').Clear;
-      AQuery.ParamByName('CODIGODEBARRAS').AsString := ADados.Itens[I].CodigoDeBarras;
+      // Codigo de barras do cadastro do SAT (PROD.CODIND), nao mais o SKU do
+      // anuncio - o SKU nem sempre e' um codigo de barras (pedido do cliente
+      // 29/10/2026).
+      AQuery.ParamByName('CODIGODEBARRAS').AsString := CodigoDeBarrasItem;
       // order_item_id do marketplace continua indo pro OBS (nao pro
       // ID_ITEM, que agora e' so um numero sequencial interno nosso) -
       // ver ExtrairCamposObsItem em uFrmPedidosMarketplace.pas.

@@ -205,7 +205,9 @@ type
     procedure PreencherSituacaoPedidos;
 
     function DescreverSituacaoPedido(const AStatus, AStatusEnvio: string;
-      out AProximoPasso: string): string;
+      out AProximoPasso: string; out APodeBaixar: Boolean): string;
+
+    procedure StatusDaLinha(ALinha: Integer; out AStatus, AStatusEnvio: string);
 
     procedure CarregarPedidosTikTokShop;
 
@@ -1051,55 +1053,65 @@ end;
 const
   PASSO_BAIXAR = 'Baixar Pedido SAT';
 
-// Traduz o status do marketplace em "o que significa" (retorno) e "o que
-// fazer agora" (AProximoPasso, vazio quando nao ha nada a fazer). No Mercado
-// Livre AStatus e' o status do PEDIDO e AStatusEnvio o do envio; nos demais
-// AStatusEnvio vem vazio. Os passos que levam a PASSO_BAIXAR batem com
-// StatusIndicaDespachado - se mudar um, mudar o outro.
+// Traduz o status do marketplace em "o que significa" (retorno), "o que
+// fazer no marketplace" (AProximoPasso, vazio quando nao ha nada a fazer) e
+// se o pedido ja pode ser baixado no SAT (APodeBaixar). E' a regra UNICA do
+// botao "Baixar Pedido SAT" - AtualizarEstadoBotoes usa o mesmo APodeBaixar.
+// {OPCAO A - cliente 29/10/2026} a baixa e' liberada a partir do pedido
+// PAGO, antes do despacho, pra conferir pedido e produto e emitir a NF no
+// SAT antes de despachar. Pedido nao pago, cancelado ou em
+// cancelamento/devolucao nao baixa. No Mercado Livre AStatus e' o status do
+// PEDIDO e AStatusEnvio o do envio; nos demais AStatusEnvio vem vazio.
 function TFrmPedidosMarketplace.DescreverSituacaoPedido(const AStatus,
-  AStatusEnvio: string; out AProximoPasso: string): string;
+  AStatusEnvio: string; out AProximoPasso: string; out APodeBaixar: Boolean): string;
 var
   Significado, Passo: string;
+  PodeBaixar: Boolean;
 
-  procedure Definir(const ASignificado, APasso: string);
+  procedure Definir(const ASignificado, APasso: string; ABaixar: Boolean);
   begin
     Significado := ASignificado;
     Passo := APasso;
+    PodeBaixar := ABaixar;
   end;
 
 begin
   Significado := '';
   Passo := '';
+  PodeBaixar := False;
   case TMarketplaces(FCodMarketplace) of
     TMarketplaces.Shopee:
       case IndexText(AStatus, ['UNPAID', 'READY_TO_SHIP', 'PROCESSED', 'RETRY_SHIP',
         'SHIPPED', 'TO_CONFIRM_RECEIVE', 'IN_CANCEL', 'CANCELLED', 'TO_RETURN',
         'COMPLETED']) of
-        0: Definir('Aguardando o pagamento do comprador', 'aguardar');
-        1: Definir('Pago, pronto para despachar', 'Despachar');
+        0: Definir('Aguardando o pagamento do comprador', 'aguardar', False);
+        1: Definir('Pago, pronto para despachar', 'emitir a NF e Despachar', True);
         2: Definir('Envio organizado e etiqueta gerada, aguardando a transportadora coletar',
-             'imprimir a etiqueta e aguardar a coleta');
+             'imprimir a etiqueta e aguardar a coleta', True);
         3: Definir('A coleta não aconteceu e o envio precisa ser organizado de novo',
-             'Despachar novamente');
-        4: Definir('Coletado pela transportadora, a caminho do comprador', PASSO_BAIXAR);
-        5: Definir('Entregue, aguardando o comprador confirmar o recebimento', PASSO_BAIXAR);
-        6: Definir('O comprador pediu o cancelamento', 'Aprovar ou Reprovar o cancelamento');
-        7: Definir('Cancelado', '');
-        8: Definir('O comprador pediu devolução', 'tratar a devolução no Seller Centre da Shopee');
-        9: Definir('Concluído', PASSO_BAIXAR);
+             'Despachar novamente', True);
+        4: Definir('Coletado pela transportadora, a caminho do comprador', '', True);
+        5: Definir('Entregue, aguardando o comprador confirmar o recebimento', '', True);
+        6: Definir('O comprador pediu o cancelamento',
+             'Aprovar ou Reprovar o cancelamento', False);
+        7: Definir('Cancelado', '', False);
+        8: Definir('O comprador pediu devolução',
+             'tratar a devolução no Seller Centre da Shopee', False);
+        9: Definir('Concluído', '', True);
       end;
 
     TMarketplaces.Amazon:
       case IndexText(AStatus, ['Pending', 'PendingAvailability', 'Unshipped',
         'PartiallyShipped', 'Shipped', 'InvoiceUnconfirmed', 'Canceled',
         'Unfulfillable']) of
-        0, 1: Definir('Pagamento ainda em análise pela Amazon', 'aguardar');
-        2: Definir('Pago, aguardando envio', 'Despachar');
-        3: Definir('Parte dos itens já foi enviada', 'Despachar os itens restantes');
-        4: Definir('Enviado', PASSO_BAIXAR);
-        5: Definir('Enviado, com a nota fiscal ainda não confirmada pela Amazon', PASSO_BAIXAR);
-        6: Definir('Cancelado', '');
-        7: Definir('A Amazon não consegue atender este pedido', '');
+        0, 1: Definir('Pagamento ainda em análise pela Amazon', 'aguardar', False);
+        2: Definir('Pago, aguardando envio', 'emitir a NF e Despachar', True);
+        3: Definir('Parte dos itens já foi enviada', 'Despachar os itens restantes', True);
+        4: Definir('Enviado', '', True);
+        5: Definir('Enviado, com a nota fiscal ainda não confirmada pela Amazon',
+             'Enviar NF', True);
+        6: Definir('Cancelado', '', False);
+        7: Definir('A Amazon não consegue atender este pedido', '', False);
       end;
 
     TMarketplaces.Magalu:
@@ -1107,37 +1119,41 @@ begin
       // pedido real - os mesmos palpites usados em StatusIndicaDespachado.
       case IndexText(AStatus, ['NEW', 'CREATED', 'APPROVED', 'INVOICED', 'SHIPPED',
         'DELIVERED', 'CANCELED', 'CANCELLED']) of
-        0, 1: Definir('Criado, aguardando a aprovação do pagamento', 'aguardar');
-        2: Definir('Pago, aguardando nota fiscal e envio', 'enviar a NF e depois Despachar');
-        3: Definir('Nota fiscal enviada', 'Despachar');
-        4: Definir('Enviado', PASSO_BAIXAR);
-        5: Definir('Entregue', PASSO_BAIXAR);
-        6, 7: Definir('Cancelado', '');
+        0, 1: Definir('Criado, aguardando a aprovação do pagamento', 'aguardar', False);
+        2: Definir('Pago, aguardando nota fiscal e envio',
+             'emitir e enviar a NF, depois Despachar', True);
+        3: Definir('Nota fiscal enviada', 'Despachar', True);
+        4: Definir('Enviado', '', True);
+        5: Definir('Entregue', '', True);
+        6, 7: Definir('Cancelado', '', False);
       end;
 
     TMarketplaces.MercadoLivre:
       case IndexText(AStatus, ['cancelled', 'payment_required', 'payment_in_process',
         'partially_paid', 'pending_cancel', 'paid', 'partially_refunded']) of
-        0: Definir('Cancelado', '');
-        1, 2, 3: Definir('Aguardando a confirmação do pagamento', 'aguardar');
-        4: Definir('Cancelamento em andamento', '');
+        0: Definir('Cancelado', '', False);
+        1, 2, 3: Definir('Aguardando a confirmação do pagamento', 'aguardar', False);
+        4: Definir('Cancelamento em andamento', '', False);
         5, 6:
           case IndexText(AStatusEnvio, ['pending', 'handling', 'ready_to_ship',
             'shipped', 'delivered', 'not_delivered', 'cancelled']) of
-            0: Definir('Pago, envio ainda sendo preparado pelo Mercado Livre', 'aguardar');
+            0: Definir('Pago, envio ainda sendo preparado pelo Mercado Livre',
+                 'aguardar o Mercado Livre liberar o envio', True);
             1: Definir('Pago, aguardando o vendedor preparar o pacote',
-                 'imprimir a etiqueta e preparar o envio');
+                 'emitir a NF, imprimir a etiqueta e preparar o envio', True);
             2: Definir('Etiqueta pronta, aguardando postagem ou coleta',
-                 'postar ou aguardar a coleta');
-            3: Definir('A caminho do comprador', PASSO_BAIXAR);
-            4: Definir('Entregue', PASSO_BAIXAR);
+                 'postar ou aguardar a coleta', True);
+            3: Definir('A caminho do comprador', '', True);
+            4: Definir('Entregue', '', True);
             5: Definir('Saiu mas não foi entregue (devolução ou extravio)',
-                 'conferir no portal do Mercado Livre');
-            6: Definir('Envio cancelado', 'conferir no portal do Mercado Livre');
+                 'conferir no portal do Mercado Livre', False);
+            6: Definir('Envio cancelado', 'conferir no portal do Mercado Livre', False);
           else
-            // Sem envio pelo ML ("a combinar") ou consulta do envio falhou.
+            // Sem envio pelo ML ("a combinar") ou consulta do envio falhou -
+            // esta pago, entao pode baixar; o clique confere o envio de novo.
             Definir('Pago, sem status de envio do Mercado Livre (entrega a combinar ' +
-              'ou envio não consultado)', 'conferir no portal do Mercado Livre');
+              'ou envio não consultado)', 'conferir a entrega no portal do Mercado Livre',
+              True);
           end;
       end;
 
@@ -1145,21 +1161,46 @@ begin
       case IndexText(AStatus, ['UNPAID', 'ON_HOLD', 'AWAITING_SHIPMENT',
         'PARTIALLY_SHIPPING', 'AWAITING_COLLECTION', 'IN_TRANSIT', 'DELIVERED',
         'COMPLETED', 'CANCELLED']) of
-        0: Definir('Aguardando o pagamento do comprador', 'aguardar');
-        1: Definir('Pago, no período em que o comprador ainda pode cancelar', 'aguardar');
-        2: Definir('Pago, aguardando envio', 'Despachar');
-        3: Definir('Parte dos itens já foi enviada', 'Despachar os itens restantes');
-        4: Definir('Pacote pronto, aguardando a transportadora coletar', 'aguardar a coleta');
-        5: Definir('A caminho do comprador', PASSO_BAIXAR);
-        6: Definir('Entregue', PASSO_BAIXAR);
-        7: Definir('Concluído', PASSO_BAIXAR);
-        8: Definir('Cancelado', '');
+        0: Definir('Aguardando o pagamento do comprador', 'aguardar', False);
+        // ON_HOLD nao baixa: o comprador ainda pode cancelar sem pedir.
+        1: Definir('Pago, no período em que o comprador ainda pode cancelar',
+             'aguardar', False);
+        2: Definir('Pago, aguardando envio', 'emitir a NF e Despachar', True);
+        3: Definir('Parte dos itens já foi enviada', 'Despachar os itens restantes', True);
+        4: Definir('Pacote pronto, aguardando a transportadora coletar',
+             'aguardar a coleta', True);
+        5: Definir('A caminho do comprador', '', True);
+        6: Definir('Entregue', '', True);
+        7: Definir('Concluído', '', True);
+        8: Definir('Cancelado', '', False);
       end;
   end;
   if Significado = '' then
     Significado := 'Status sem descrição cadastrada';
   Result := Significado;
   AProximoPasso := Passo;
+  APodeBaixar := PodeBaixar;
+end;
+
+// Status do pedido na linha ALinha da grade. No Mercado Livre a coluna
+// Status mostra "paid (envio: shipped)" - os dois status separados vem do
+// array; nos demais AStatusEnvio volta vazio.
+procedure TFrmPedidosMarketplace.StatusDaLinha(ALinha: Integer;
+  out AStatus, AStatusEnvio: string);
+begin
+  AStatus := '';
+  AStatusEnvio := '';
+  if (ALinha < 1) or (ALinha >= Grid.RowCount) then
+    Exit;
+  if TMarketplaces(FCodMarketplace) = TMarketplaces.MercadoLivre then
+  begin
+    if (ALinha - 1 <= High(FMercadoLivreOrders)) and
+       (FMercadoLivreOrders[ALinha - 1].OrderId = Trim(Grid.Cells[0, ALinha])) then
+      AStatus := FMercadoLivreOrders[ALinha - 1].Status;
+    AStatusEnvio := StatusEnvioMercadoLivre(ALinha);
+  end
+  else
+    AStatus := Grid.Cells[1, ALinha];
 end;
 
 // Preenche a coluna "Situacao / proximo passo" de todas as linhas. Tambem
@@ -1170,7 +1211,7 @@ var
   Qry: TFDQuery;
   Linha: Integer;
   OrderSN, Status, StatusEnvio, Situacao, ProximoPasso: string;
-  ConferirBaixa, JaBaixado: Boolean;
+  ConferirBaixa, JaBaixado, PodeBaixar: Boolean;
 begin
   Qry := TFDQuery.Create(nil);
   try
@@ -1185,21 +1226,8 @@ begin
         Continue;
       end;
 
-      // No Mercado Livre a coluna Status mostra "paid (envio: shipped)" - os
-      // dois status separados vem do array.
-      StatusEnvio := '';
-      if TMarketplaces(FCodMarketplace) = TMarketplaces.MercadoLivre then
-      begin
-        Status := '';
-        if (Linha - 1 <= High(FMercadoLivreOrders)) and
-           (FMercadoLivreOrders[Linha - 1].OrderId = OrderSN) then
-          Status := FMercadoLivreOrders[Linha - 1].Status;
-        StatusEnvio := StatusEnvioMercadoLivre(Linha);
-      end
-      else
-        Status := Grid.Cells[1, Linha];
-
-      Situacao := DescreverSituacaoPedido(Status, StatusEnvio, ProximoPasso);
+      StatusDaLinha(Linha, Status, StatusEnvio);
+      Situacao := DescreverSituacaoPedido(Status, StatusEnvio, ProximoPasso, PodeBaixar);
 
       JaBaixado := False;
       if ConferirBaixa then
@@ -1214,12 +1242,16 @@ begin
           end;
         end;
 
+      // Baixa no SAT vem antes do passo no marketplace: o pedido e' baixado,
+      // a NF sai do SAT e so' depois ele e' despachado.
       if JaBaixado then
+        Situacao := Situacao + ' (já baixado no SAT)'
+      else if PodeBaixar then
       begin
-        if ProximoPasso = PASSO_BAIXAR then
-          ProximoPasso := 'nenhum, já baixado no SAT'
+        if ProximoPasso <> '' then
+          ProximoPasso := PASSO_BAIXAR + ', depois ' + ProximoPasso
         else
-          Situacao := Situacao + ' (já baixado no SAT)';
+          ProximoPasso := PASSO_BAIXAR;
       end;
 
       if ProximoPasso <> '' then
@@ -1249,11 +1281,11 @@ procedure TFrmPedidosMarketplace.AtualizarEstadoBotoes(const ALinha: Integer = -
 
 var
 
-  Status, StatusDespacho: string;
+  Status, StatusPedido, StatusEnvio, ProximoPasso: string;
 
   Linha: Integer;
 
-  TemPedidoSelecionado: Boolean;
+  TemPedidoSelecionado, PodeBaixar: Boolean;
 
 begin
 
@@ -1389,23 +1421,27 @@ begin
 
   // "Baixar Pedido SAT" - mesmo fluxo generico (uBaixaPedidoSAT) pra todos os
 
-  // marketplaces, habilitado so quando o pedido ja foi despachado (antes
+  // marketplaces. {OPCAO A - cliente 29/10/2026} habilitado a partir do
 
-  // disso nao faz sentido gerar a venda no SAT). No Mercado Livre quem diz
+  // pedido PAGO, mesmo antes do despacho - a regra e' a mesma da coluna
 
-  // isso e' o status do ENVIO, nao o do pedido que aparece na grade.
+  // "Situacao / proximo passo" (DescreverSituacaoPedido). Antes do despacho
 
-  if TemPedidoSelecionado and
+  // o clique pede confirmacao (ver CmdBaixarPedidoSATClick).
 
-     (TMarketplaces(FCodMarketplace) = TMarketplaces.MercadoLivre) then
+  PodeBaixar := False;
 
-    StatusDespacho := StatusEnvioMercadoLivre(Linha)
+  if TemPedidoSelecionado then
 
-  else
+  begin
 
-    StatusDespacho := Status;
+    StatusDaLinha(Linha, StatusPedido, StatusEnvio);
 
-  CmdBaixarPedidoSAT.Enabled := TemPedidoSelecionado and StatusIndicaDespachado(StatusDespacho);
+    DescreverSituacaoPedido(StatusPedido, StatusEnvio, ProximoPasso, PodeBaixar);
+
+  end;
+
+  CmdBaixarPedidoSAT.Enabled := TemPedidoSelecionado and PodeBaixar;
 
 end;
 
@@ -4627,11 +4663,14 @@ begin
           ' do pedido ' + AOrderSN + ' (' + ErroEnvio + ') - endereco de entrega ' +
           'ficara vazio.')
       // Confere de novo na hora da baixa: o botao foi habilitado pelo status
-      // lido na listagem, que pode ter mudado (ex.: envio cancelado).
-      else if not StatusIndicaDespachado(Envio.Status) then
+      // lido na listagem, que pode ter mudado. Desde a opcao A (29/10/2026)
+      // pedido pago ainda nao despachado tambem baixa - so' recusa envio que
+      // nao vai mais acontecer.
+      else if SameText(Envio.Status, 'cancelled') or
+              SameText(Envio.Status, 'not_delivered') then
       begin
-        AErroMsg := 'o pedido ainda nao foi despachado no Mercado Livre (status ' +
-          'do envio: ' + Envio.Status + '). Baixe no SAT depois do despacho.';
+        AErroMsg := 'o envio deste pedido no Mercado Livre esta como "' +
+          Envio.Status + '" - confira no portal antes de baixar no SAT.';
         Exit;
       end;
     end
@@ -5069,6 +5108,8 @@ var
 
   MontagemOk: Boolean;
 
+  StatusPedido, StatusEnvio: string;
+
 begin
 
   if not (TMarketplaces(FCodMarketplace) in
@@ -5124,6 +5165,36 @@ begin
       Exit;
 
     end;
+
+
+
+    // {OPCAO A - cliente 29/10/2026} baixa antes do despacho e' permitida, mas
+
+    // a VENDA_EMITIR ja transforma o pedido em venda e baixa o estoque - se o
+
+    // comprador cancelar antes do envio, a venda tem que ser cancelada a mao.
+
+    // No Mercado Livre o que vale e' o status do envio.
+
+    StatusDaLinha(Grid.Row, StatusPedido, StatusEnvio);
+
+    if TMarketplaces(FCodMarketplace) = TMarketplaces.MercadoLivre then
+
+      StatusPedido := StatusEnvio;
+
+    if not StatusIndicaDespachado(StatusPedido) then
+
+      if MessageDlg('Este pedido ainda NAO foi despachado.' + sLineBreak + sLineBreak +
+
+           'A baixa emite a venda no SAT agora e ja baixa o estoque. Se o ' +
+
+           'comprador cancelar antes do envio, a venda precisa ser cancelada ' +
+
+           'manualmente no SAT.' + sLineBreak + sLineBreak + 'Baixar mesmo assim?',
+
+           mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
+
+        Exit;
 
 
 
