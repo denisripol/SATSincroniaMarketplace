@@ -110,7 +110,7 @@ type
     DataCriacao: TDateTime;             // create_time -> oe.HORA
     DataUltimaAtualizacao: TDateTime;   // update_time -> oe.DATAHORADOENVIO
     ValorTotalPedido: Double;           // total_amount -> oe.TOTALDOPEDIDO
-    FreteReal: Double;                  // actual_shipping_fee (get_order_detail) -> oe.frete
+    FreteReal: Double;                  // frete pago pelo comprador (Shopee: buyer_paid_shipping_fee do escrow) -> oe.frete
     Transportadora: string;             // shipping_carrier -> oe.MOTIVO_E ({ATENCAO} pedido do cliente: aumentar tamanho do campo no banco)
     DataColeta: TDateTime;              // pickup_done_time -> oe.data_ent
     ValorRepasse: Double;               // escrow_amount (get_escrow_detail) -> pgtos.VALOR_CON / pgtos.VALOR_PG

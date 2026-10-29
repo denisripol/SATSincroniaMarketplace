@@ -3838,6 +3838,40 @@ begin
   end;
 end;
 
+// Frete do pedido Shopee -> oe.frete (pedido do cliente 29/10/2026).
+// {ATENCAO} NAO usar actual_shipping_fee do get_order_detail: ele fica 0
+// enquanto actual_shipping_fee_confirmed = false (ate a transportadora
+// confirmar o custo) e, mesmo confirmado, e' o custo do vendedor com a
+// transportadora - nao o frete da venda. O frete da venda e' o que o
+// comprador pagou (buyer_paid_shipping_fee do escrow): total_amount =
+// itens + esse frete (ex.: 3,94 + 8,39 = 12,33). Frete gratis pro
+// comprador vem 0 aqui, e 0 e' o certo nesse caso.
+// Escrow ainda indisponivel: cai no estimated_shipping_fee do pedido.
+function FreteDoPedidoShopee(const ADetalheRawJSON, AEscrowRawJSON: string;
+  out AOrigem: string): Double;
+const
+  MAPA_FRETE_ESCROW: array[0..0] of TMapeamentoObs = (
+    (Caminho: 'buyer_paid_shipping_fee'; Rotulo: 'buyer_paid_shipping_fee'));
+  MAPA_FRETE_PEDIDO: array[0..0] of TMapeamentoObs = (
+    (Caminho: 'estimated_shipping_fee'; Rotulo: 'estimated_shipping_fee'));
+var
+  Campos: TCamposObsArray;
+begin
+  Result := 0;
+  AOrigem := '';
+  Campos := ExtrairCamposObsEscrow(AEscrowRawJSON, MAPA_FRETE_ESCROW);
+  if (Length(Campos) = 1) and (Trim(Campos[0].Valor) <> '') then
+    AOrigem := Campos[0].Nome
+  else
+  begin
+    Campos := ExtrairCamposObsPedido(ADetalheRawJSON, MAPA_FRETE_PEDIDO);
+    if (Length(Campos) = 1) and (Trim(Campos[0].Valor) <> '') then
+      AOrigem := Campos[0].Nome;
+  end;
+  if AOrigem <> '' then
+    Result := StrToFloatDef(Trim(Campos[0].Valor), 0, TFormatSettings.Invariant);
+end;
+
 // Monta os campos OBS de UM item (mistura o mapa fixo item_list com o
 // detalhamento financeiro do escrow, se achar o item correspondente
 // dentro de response.order_income.items[] por item_id/order_item_id).
@@ -4027,6 +4061,8 @@ var
 
   EscrowRawJSON, EscrowPaymentMethod: string;
 
+  OrigemFrete: string;
+
   EscrowAmount, EscrowBuyerTotal: Double;
 
   I: Integer;
@@ -4089,7 +4125,12 @@ begin
 
     ADados.ValorTotalPedido := Detalhe.TotalAmount;
 
-    ADados.FreteReal := Detalhe.ActualShippingFee;
+    // Frete da venda = o que o comprador pagou - ver FreteDoPedidoShopee.
+    ADados.FreteReal := FreteDoPedidoShopee(Detalhe.RawJSON, EscrowRawJSON, OrigemFrete);
+    if OrigemFrete = '' then
+      OrigemFrete := 'sem frete no retorno da Shopee';
+    Log('Frete do pedido ' + AOrderSN + ': ' +
+      FormatFloat('0.00', ADados.FreteReal) + ' (' + OrigemFrete + ')');
 
     ADados.Transportadora := Detalhe.ShippingCarrier;
 
