@@ -129,6 +129,19 @@ type
     RawJSON: string; // resposta completa - usado pra extrair os campos "-> oe.obs"
   end;
 
+  // Dados da NF-e do pedido (Brasil) - mesmos nomes do objeto invoice_data
+  // que a Shopee devolve no get_order_detail (number, series_number,
+  // access_key, issue_date, total_value, products_total_value, tax_code).
+  TShopeeInvoiceData = record
+    Number: string;
+    SeriesNumber: string;
+    AccessKey: string;          // chave de 44 digitos
+    IssueDate: TDateTime;       // vai como timestamp Unix
+    TotalValue: Double;
+    ProductsTotalValue: Double;
+    TaxCode: string;            // {NAO CONFIRMADO} enviamos o CFOP
+  end;
+
   TShopeeOpenAPIClient = class
   private
     FPartnerID: Int64;
@@ -266,6 +279,9 @@ type
     function DownloadShippingDocument(const AAccessToken: string; AShopID: Int64;
       const AOrderSN: string; out APdfBytes: TBytes; out AErrorMessage: string): Boolean;
     // --- Nota Fiscal (Invoice - Brasil) ---
+    function AddInvoiceData(const AAccessToken: string; AShopID: Int64;
+      const AOrderSN: string; const AInvoice: TShopeeInvoiceData;
+      out AErrorMessage: string): Boolean;
     function UploadInvoiceDoc(const AAccessToken: string; AShopID: Int64;
       const AOrderSN: string; const APdfBytes: TBytes; out AErrorMessage: string): Boolean;
     function DownloadInvoiceDoc(const AAccessToken: string; AShopID: Int64;
@@ -2591,6 +2607,70 @@ begin
     end;
   end;
 end;
+// Informa a NF-e do pedido (Brasil). {NAO CONFIRMADO - 04/11/2026} endpoint
+// e formato do corpo conforme a documentacao lembrada de memoria; os nomes
+// dos campos de invoice_data sao os mesmos que a Shopee devolve no
+// get_order_detail (esses confirmados num pedido real). tax_code: enviamos o
+// CFOP - conferir na primeira resposta da Shopee.
+function TShopeeOpenAPIClient.AddInvoiceData(const AAccessToken: string;
+  AShopID: Int64; const AOrderSN: string; const AInvoice: TShopeeInvoiceData;
+  out AErrorMessage: string): Boolean;
+const
+  API_PATH = '/api/v2/order/add_invoice_data';
+var
+  BodyJSON, InvoiceJSON: TJSONObject;
+  BodyStr, ResponseStr: string;
+  StatusCode: Integer;
+  JSONValue: TJSONValue;
+  JSONObj: TJSONObject;
+begin
+  Result := False;
+  AErrorMessage := '';
+  BodyJSON := TJSONObject.Create;
+  try
+    BodyJSON.AddPair('order_sn', AOrderSN);
+    InvoiceJSON := TJSONObject.Create;
+    BodyJSON.AddPair('invoice_data', InvoiceJSON);
+    InvoiceJSON.AddPair('number', AInvoice.Number);
+    InvoiceJSON.AddPair('series_number', AInvoice.SeriesNumber);
+    InvoiceJSON.AddPair('access_key', AInvoice.AccessKey);
+    InvoiceJSON.AddPair('issue_date', TJSONNumber.Create(
+      DateTimeToUnix(TTimeZone.Local.ToUniversalTime(AInvoice.IssueDate))));
+    InvoiceJSON.AddPair('total_value', TJSONNumber.Create(AInvoice.TotalValue));
+    InvoiceJSON.AddPair('products_total_value',
+      TJSONNumber.Create(AInvoice.ProductsTotalValue));
+    InvoiceJSON.AddPair('tax_code', AInvoice.TaxCode);
+    BodyStr := BodyJSON.ToJSON;
+  finally
+    BodyJSON.Free;
+  end;
+  DoLog('AddInvoiceData body enviado: ' + BodyStr);
+  ResponseStr := ExecutePost(API_PATH, BodyStr, AAccessToken, AShopID, StatusCode);
+  DoLog('AddInvoiceData resposta: ' + ResponseStr);
+  if StatusCode >= 400 then
+  begin
+    AErrorMessage := FormatarErroHTTP(StatusCode, ResponseStr, 'informar os dados da nota fiscal');
+    Exit;
+  end;
+  JSONValue := TJSONObject.ParseJSONValue(ResponseStr);
+  try
+    if JSONValue is TJSONObject then
+    begin
+      JSONObj := TJSONObject(JSONValue);
+      if Assigned(JSONObj.GetValue('error')) and (JSONObj.GetValue<string>('error') <> '') then
+      begin
+        AErrorMessage := JSONObj.GetValue<string>('error');
+        if Assigned(JSONObj.GetValue('message')) then
+          AErrorMessage := AErrorMessage + ': ' + JSONObj.GetValue<string>('message');
+        Exit;
+      end;
+    end;
+    Result := True;
+  finally
+    JSONValue.Free;
+  end;
+end;
+
 function TShopeeOpenAPIClient.UploadInvoiceDoc(const AAccessToken: string;
   AShopID: Int64; const AOrderSN: string; const APdfBytes: TBytes;
   out AErrorMessage: string): Boolean;
@@ -2624,7 +2704,13 @@ begin
   MultipartData := TMultipartFormData.Create;
   try
     MultipartData.AddField('order_sn', AOrderSN);
-    MultipartData.AddStream('invoice', TBytesStream.Create(APdfBytes),
+    // {NAO CONFIRMADO - 04/11/2026} campos conforme a documentacao do
+    // upload_invoice_doc lembrada de memoria (o site da Shopee nao abriu
+    // pra conferir): file_type 3 = PDF e o arquivo no campo "file". Antes
+    // ia no campo "invoice", sem file_type - tambem nunca testado. Se a
+    // Shopee recusar, a resposta bruta sai no log logo abaixo.
+    MultipartData.AddField('file_type', '3');
+    MultipartData.AddStream('file', TBytesStream.Create(APdfBytes),
       'nota_fiscal_' + AOrderSN + '.pdf', 'application/pdf');
     DoLog('UploadInvoiceDoc: enviando ' + IntToStr(Length(APdfBytes)) +
       ' bytes para o pedido ' + AOrderSN);
