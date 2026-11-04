@@ -59,6 +59,18 @@
       TabOrder = 1
       OnClick = CmdAtualizarClick
     end
+    object CmdObservacaoStatus: TBitBtn
+      Left = 766
+      Top = 14
+      Width = 140
+      Height = 28
+      Hint = 'Mostra a ordem normal dos status do pedido neste marketplace'
+      Caption = 'Observa'#231#227'o Status'
+      ParentShowHint = False
+      ShowHint = True
+      TabOrder = 2
+      OnClick = CmdObservacaoStatusClick
+    end
   end
   object Grid: TStringGrid
     Left = 0

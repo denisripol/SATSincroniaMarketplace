@@ -60,7 +60,8 @@ uses
   Vcl.Forms, Vcl.Dialogs, Vcl.StdCtrls, Vcl.ExtCtrls, Vcl.Buttons, Vcl.Grids,
 
   uMarketplace, Shopee.OpenAPI.Client, Amazon.SPAPI.Client, Magalu.OpenAPI.Client,
-  uFrmDespacharAmazon, Data.DB, FireDAC.Comp.Client, DMZ, uBaixaPedidoSAT,
+  uFrmDespacharAmazon, Data.DB, FireDAC.Comp.Client, DMZ, uBaixaPedidoSAT, uDanfeNFe,
+  uFluxoStatusMarketplace,
   MercadoLivre.OpenAPI.Client, TikTokShop.OpenAPI.Client;
 
 
@@ -78,6 +79,7 @@ type
     edtDiasAtras: TEdit;
 
     CmdAtualizar: TBitBtn;
+    CmdObservacaoStatus: TBitBtn;
 
     Grid: TStringGrid;
 
@@ -110,6 +112,7 @@ type
     procedure FormCreate(Sender: TObject);
 
     procedure CmdAtualizarClick(Sender: TObject);
+    procedure CmdObservacaoStatusClick(Sender: TObject);
 
     procedure GridClick(Sender: TObject);
     procedure GridSelectCell(Sender: TObject; ACol, ARow: Integer;
@@ -203,6 +206,10 @@ type
     function StatusEnvioMercadoLivre(ALinha: Integer): string;
 
     procedure PreencherSituacaoPedidos;
+    function PedidoConcluido(const AStatus, AStatusEnvio, ANF: string;
+      const ADataEnvioNF: TDateTime): Boolean;
+    procedure RemoverLinhaDaGrade(const ALinha: Integer);
+    procedure RegistrarNFEnviada(const AOrderSN: string);
 
     function DescreverSituacaoPedido(const AStatus, AStatusEnvio: string;
       out AProximoPasso: string; out APodeBaixar: Boolean): string;
@@ -213,6 +220,7 @@ type
 
     procedure AtualizarEstadoBotoes(const ALinha: Integer = -1);
     function PedidoSelecionado(out AOrderSN: string): Boolean;
+    function NFAutorizadaNaLinha(const ALinha: Integer): Boolean;
 
     function StatusIndicaDespachado(const AStatus: string): Boolean;
 
@@ -254,9 +262,18 @@ implementation
 
 const
 
+  // Colunas da baixa no SAT (04/11/2026): OE gerada e a NF emitida depois
+  // pelo SAT em cima dela - preenchidas em PreencherSituacaoPedidos.
+
+  COL_ID_OE = 4;
+
+  COL_DATA_OE = 5;
+
+  COL_NF = 6;
+
   // Coluna da grade com o significado do status e o proximo passo.
 
-  COL_SITUACAO = 4;
+  COL_SITUACAO = 7;
 
 
 
@@ -324,7 +341,7 @@ procedure TFrmPedidosMarketplace.FormCreate(Sender: TObject);
 
 begin
 
-  Grid.ColCount := 5;
+  Grid.ColCount := 8;
 
   Grid.RowCount := 2; // FixedRows precisa ser sempre < RowCount
 
@@ -337,6 +354,12 @@ begin
   Grid.Cells[2, 0] := 'Data';
 
   Grid.Cells[3, 0] := 'Total';
+
+  Grid.Cells[COL_ID_OE, 0] := 'ID OE';
+
+  Grid.Cells[COL_DATA_OE, 0] := 'Data OE';
+
+  Grid.Cells[COL_NF, 0] := 'NF';
 
   // Coluna 4: o que o status quer dizer e o proximo passo (pedido do
 
@@ -354,9 +377,23 @@ begin
 
   Grid.ColWidths[3] := 100;
 
+  Grid.ColWidths[COL_ID_OE] := 70;
+
+  Grid.ColWidths[COL_DATA_OE] := 80;
+
+  Grid.ColWidths[COL_NF] := 140;
+
   Grid.ColWidths[COL_SITUACAO] := 560;
 
-  ClientWidth := 1130;
+  // Cabe tudo sem rolagem horizontal em tela de 1440 ou mais; em tela menor
+
+  // a tela fica do tamanho da area util e a grade rola.
+
+  ClientWidth := 1420;
+
+  if Width > Screen.WorkAreaWidth then
+
+    Width := Screen.WorkAreaWidth;
 
 
 
@@ -1204,21 +1241,30 @@ begin
 end;
 
 // Preenche a coluna "Situacao / proximo passo" de todas as linhas. Tambem
-// confere em MARKETPLACE_PEDIDOS se o pedido ja foi baixado, pra nao mandar
+// confere em OE_PEDIDOS se o pedido ja foi baixado, pra nao mandar
 // o usuario baixar de novo. Falha nessa conferencia nao derruba a listagem.
+// {04/11/2026} pedido finalizado no marketplace e com a NF ja enviada sai
+// da grade - ver PedidoConcluido.
 procedure TFrmPedidosMarketplace.PreencherSituacaoPedidos;
 var
   Qry: TFDQuery;
-  Linha: Integer;
-  OrderSN, Status, StatusEnvio, Situacao, ProximoPasso: string;
+  Linha, I: Integer;
+  OrderSN, Status, StatusEnvio, Situacao, ProximoPasso, NF: string;
   ConferirBaixa, JaBaixado, PodeBaixar: Boolean;
+  CodOE: Integer;
+  DataOE, DataEnvioNF: TDateTime;
+  LinhasOcultas: TArray<Integer>;
 begin
+  SetLength(LinhasOcultas, 0);
   Qry := TFDQuery.Create(nil);
   try
     Qry.Connection := DZ.ZDatabase;
     ConferirBaixa := True;
     for Linha := 1 to Grid.RowCount - 1 do
     begin
+      Grid.Cells[COL_ID_OE, Linha] := '';
+      Grid.Cells[COL_DATA_OE, Linha] := '';
+      Grid.Cells[COL_NF, Linha] := '';
       OrderSN := Trim(Grid.Cells[0, Linha]);
       if OrderSN = '' then
       begin
@@ -1230,17 +1276,36 @@ begin
       Situacao := DescreverSituacaoPedido(Status, StatusEnvio, ProximoPasso, PodeBaixar);
 
       JaBaixado := False;
+      DataEnvioNF := 0;
+      NF := '';
       if ConferirBaixa then
         try
-          JaBaixado := PedidoJaBaixado(Qry, FLoja, FCodMarketplace, OrderSN);
+          JaBaixado := BuscarBaixaDoPedido(Qry, FLoja, FCodMarketplace, OrderSN,
+            CodOE, DataOE, NF, DataEnvioNF);
+          if JaBaixado then
+          begin
+            Grid.Cells[COL_ID_OE, Linha] := IntToStr(CodOE);
+            Grid.Cells[COL_DATA_OE, Linha] := FormatDateTime('dd/mm/yyyy', DataOE);
+            if (NF <> '') and (DataEnvioNF > 0) then
+              Grid.Cells[COL_NF, Linha] := NF + SUFIXO_NF_ENVIADA
+            else
+              Grid.Cells[COL_NF, Linha] := NF;
+          end;
         except
           on E: Exception do
           begin
             ConferirBaixa := False;
+            JaBaixado := False;
             Log('Aviso: nao foi possivel conferir quais pedidos ja foram baixados ' +
               'no SAT (' + E.Message + ').');
           end;
         end;
+
+      if JaBaixado and PedidoConcluido(Status, StatusEnvio, NF, DataEnvioNF) then
+      begin
+        LinhasOcultas := LinhasOcultas + [Linha];
+        Continue;
+      end;
 
       // Baixa no SAT vem antes do passo no marketplace: o pedido e' baixado,
       // a NF sai do SAT e so' depois ele e' despachado.
@@ -1261,6 +1326,134 @@ begin
   finally
     Qry.Free;
   end;
+
+  // De baixo pra cima, pra nao deslocar as linhas que ainda vao sair.
+  for I := High(LinhasOcultas) downto 0 do
+    RemoverLinhaDaGrade(LinhasOcultas[I]);
+  if Length(LinhasOcultas) > 0 then
+    Log(Format('%d pedido(s) finalizado(s) com a nota fiscal enviada nao aparecem ' +
+      'na lista.', [Length(LinhasOcultas)]));
+end;
+
+// Pedido que ja nao precisa de nada na tela (04/11/2026): finalizado no
+// marketplace E com a nota fiscal enviada.
+// - Finalizado: Shopee e TikTok COMPLETED; Amazon Shipped (a Amazon nao tem
+//   status de entregue); Magalu DELIVERED; Mercado Livre envio delivered.
+// - NF enviada: Shopee e Amazon, pelo botao "Enviar Nota Fiscal"
+//   (OE_PEDIDOS.DATA_ENVIO_NF). Mercado Livre, TikTok e Magalu nao tem esse
+//   botao (a NF vai pelo portal do marketplace) - nesses basta a NF
+//   autorizada gerada pelo SAT.
+function TFrmPedidosMarketplace.PedidoConcluido(const AStatus, AStatusEnvio,
+  ANF: string; const ADataEnvioNF: TDateTime): Boolean;
+var
+  Finalizado, NFAutorizada: Boolean;
+begin
+  case TMarketplaces(FCodMarketplace) of
+    TMarketplaces.Shopee, TMarketplaces.TikTokShop:
+      Finalizado := SameText(AStatus, 'COMPLETED');
+    TMarketplaces.Amazon:
+      Finalizado := SameText(AStatus, 'Shipped');
+    TMarketplaces.Magalu:
+      Finalizado := SameText(AStatus, 'DELIVERED');
+    TMarketplaces.MercadoLivre:
+      Finalizado := SameText(AStatusEnvio, 'delivered');
+  else
+    Finalizado := False;
+  end;
+  if not Finalizado then
+    Exit(False);
+  if TMarketplaces(FCodMarketplace) in [TMarketplaces.Shopee, TMarketplaces.Amazon] then
+    Result := ADataEnvioNF > 0
+  else
+  begin
+    NFAutorizada := (ANF <> '') and (Pos(Trim(SUFIXO_NF_NAO_AUTORIZADA), ANF) = 0);
+    Result := NFAutorizada;
+  end;
+end;
+
+// Grava que a NF do pedido foi enviada (OE_PEDIDOS.DATA_ENVIO_NF) e atualiza
+// a grade - se o pedido ja estiver finalizado, ele sai da lista. Falha aqui
+// so' e' logada: a NF ja foi aceita pelo marketplace.
+procedure TFrmPedidosMarketplace.RegistrarNFEnviada(const AOrderSN: string);
+var
+  Qry: TFDQuery;
+begin
+  Qry := TFDQuery.Create(nil);
+  try
+    Qry.Connection := DZ.ZDatabase;
+    try
+      MarcarNFEnviada(Qry, FLoja, FCodMarketplace, AOrderSN);
+    except
+      on E: Exception do
+        Log('Aviso: a nota fiscal do pedido ' + AOrderSN + ' foi enviada, mas nao ' +
+          'foi possivel registrar o envio no SAT (' + E.Message + ').');
+    end;
+  finally
+    Qry.Free;
+  end;
+  PreencherSituacaoPedidos;
+  AtualizarEstadoBotoes;
+end;
+
+// Botao "Observacao Status" (04/11/2026): abre o fluxo de status do
+// marketplace desta loja (texto em uFluxoStatusMarketplace).
+procedure TFrmPedidosMarketplace.CmdObservacaoStatusClick(Sender: TObject);
+var
+  Qry: TFDQuery;
+  NomeLoja: string;
+begin
+  NomeLoja := 'Loja ' + IntToStr(FLoja);
+  Qry := TFDQuery.Create(nil);
+  try
+    Qry.Connection := DZ.ZDatabase;
+    try
+      Qry.SQL.Text := 'SELECT LOJAD FROM LOJAS WHERE LOJA = :LOJA';
+      Qry.ParamByName('LOJA').AsInteger := FLoja;
+      Qry.Open;
+      if Trim(Qry.FieldByName('LOJAD').AsString) <> '' then
+        NomeLoja := NomeLoja + ' (' + Trim(Qry.FieldByName('LOJAD').AsString) + ')';
+    except
+      // so' o nome no titulo - sem ele, abre com o numero da loja
+    end;
+  finally
+    Qry.Free;
+  end;
+  MostrarFluxoStatus(TMarketplaces(FCodMarketplace), NomeLoja);
+end;
+
+// Tira a linha da grade e o pedido correspondente do array do marketplace -
+// os arrays sao lidos pelo indice da linha (linha N = item N - 1), entao os
+// dois precisam andar juntos.
+procedure TFrmPedidosMarketplace.RemoverLinhaDaGrade(const ALinha: Integer);
+var
+  I, Indice: Integer;
+begin
+  if (ALinha < 1) or (ALinha >= Grid.RowCount) then
+    Exit;
+  Indice := ALinha - 1;
+  case TMarketplaces(FCodMarketplace) of
+    TMarketplaces.Shopee:
+      if Indice <= High(FOrders) then
+        Delete(FOrders, Indice, 1);
+    TMarketplaces.Amazon:
+      if Indice <= High(FAmazonOrders) then
+        Delete(FAmazonOrders, Indice, 1);
+    TMarketplaces.Magalu:
+      if Indice <= High(FMagaluOrders) then
+        Delete(FMagaluOrders, Indice, 1);
+    TMarketplaces.MercadoLivre:
+      if Indice <= High(FMercadoLivreOrders) then
+        Delete(FMercadoLivreOrders, Indice, 1);
+    TMarketplaces.TikTokShop:
+      if Indice <= High(FTikTokOrders) then
+        Delete(FTikTokOrders, Indice, 1);
+  end;
+  for I := ALinha to Grid.RowCount - 2 do
+    Grid.Rows[I].Assign(Grid.Rows[I + 1]);
+  if Grid.RowCount > 2 then
+    Grid.RowCount := Grid.RowCount - 1
+  else
+    Grid.Rows[1].Clear; // FixedRows = 1 exige RowCount >= 2
 end;
 
 
@@ -1385,7 +1578,7 @@ begin
 
         CmdBaixarNF.Enabled := CmdGerarEtiqueta.Enabled;
 
-        CmdEnviarNF.Enabled := CmdGerarEtiqueta.Enabled;
+        CmdEnviarNF.Enabled := CmdGerarEtiqueta.Enabled and NFAutorizadaNaLinha(Linha);
 
       end;
 
@@ -1413,7 +1606,9 @@ begin
 
     CmdBaixarNF.Enabled := TemPedidoSelecionado;
 
-    CmdEnviarNF.Enabled := TemPedidoSelecionado;
+    // Enviar NF so' com a nota gerada pelo SAT e autorizada (04/11/2026).
+
+    CmdEnviarNF.Enabled := TemPedidoSelecionado and NFAutorizadaNaLinha(Linha);
 
   end;
 
@@ -1489,6 +1684,19 @@ begin
 
     AOrderSN := Grid.Cells[0, Grid.Row];
 
+end;
+
+// Coluna NF da linha preenchida com nota autorizada - regra do botao
+// "Enviar NF" (04/11/2026). O clique confere de novo no banco.
+function TFrmPedidosMarketplace.NFAutorizadaNaLinha(const ALinha: Integer): Boolean;
+var
+  NF: string;
+begin
+  Result := False;
+  if (ALinha < 1) or (ALinha >= Grid.RowCount) then
+    Exit;
+  NF := Trim(Grid.Cells[COL_NF, ALinha]);
+  Result := (NF <> '') and (Pos(Trim(SUFIXO_NF_NAO_AUTORIZADA), NF) = 0);
 end;
 
 
@@ -3288,191 +3496,195 @@ end;
 
 
 procedure TFrmPedidosMarketplace.CmdEnviarNFClick(Sender: TObject);
-
 var
-
+  Qry: TFDQuery;
   ClienteShopee: TShopeeOpenAPIClient;
-
   ClienteAmazon: TAmazonSPAPIClient;
-
-  OrderSN, ErroMsg: string;
-
-  FileBytes: TBytes;
-
+  OrderSN, ErroMsg, NumeroNF, XMLNFe, NFNaGrade: string;
+  CodOE, IdNF: Integer;
+  DataOE, DataEnvioNF: TDateTime;
+  Autorizada, DadosOk, PdfOk: Boolean;
+  DadosNF: TDadosNotaFiscal;
+  Invoice: TShopeeInvoiceData;
+  PdfBytes: TBytes;
 begin
-
   if AcaoIndisponivelNesteMarketplace('Enviar Nota Fiscal') then
-
     Exit;
-
-  if TMarketplaces(FCodMarketplace) = TMarketplaces.TikTokShop then
-
-  begin
-
-    ShowMessage('Nota fiscal ainda nao implementada para o TikTok Shop nesta tela. ' +
-
-      'Favor utilizar o Seller Center do TikTok para essa operacao.');
-
-    Exit;
-
+  // {NAO IMPLEMENTADO} Mercado Livre, TikTok Shop e Magalu - ver comentario
+  // de 04/11/2026 no fim deste metodo.
+  case TMarketplaces(FCodMarketplace) of
+    TMarketplaces.TikTokShop:
+      begin
+        ShowMessage('Nota fiscal ainda nao implementada para o TikTok Shop nesta tela. ' +
+          'Favor utilizar o Seller Center do TikTok para essa operacao.');
+        Exit;
+      end;
+    TMarketplaces.Magalu:
+      begin
+        ShowMessage('Enviar Nota Fiscal ainda nao implementado para o Magalu. ' +
+          'Favor utilizar o Portal do Seller para essa operacao.');
+        Exit;
+      end;
+    TMarketplaces.MercadoLivre:
+      begin
+        ShowMessage('Enviar Nota Fiscal ainda nao implementado para o Mercado Livre. ' +
+          'Favor utilizar o painel do Mercado Livre para essa operacao.');
+        Exit;
+      end;
   end;
-
   if not PedidoSelecionado(OrderSN) then
-
   begin
-
     ShowMessage('Selecione um pedido na lista primeiro.');
-
     Exit;
-
   end;
 
-
+  // A nota vem do SAT (04/11/2026): pedido baixado -> OE -> NF gerada pelo
+  // SAT em cima da OE. Confere de novo no banco, sem confiar so' na grade
+  // (a NF pode ter sido cancelada/gerada depois que a lista foi carregada).
+  Qry := TFDQuery.Create(nil);
+  try
+    Qry.Connection := DZ.ZDatabase;
+    if not BuscarBaixaDoPedido(Qry, FLoja, FCodMarketplace, OrderSN, CodOE,
+         DataOE, NFNaGrade, DataEnvioNF) then
+    begin
+      ShowMessage('O pedido ' + OrderSN + ' ainda nao foi baixado no SAT. ' +
+        'Use "Baixar Pedido SAT" e gere a nota fiscal no SAT antes de enviar.');
+      Exit;
+    end;
+    if not BuscarNFDaOE(Qry, CodOE, DataOE, IdNF, NumeroNF, Autorizada) then
+    begin
+      ShowMessage('A nota fiscal da OE ' + IntToStr(CodOE) + ' ainda nao foi ' +
+        'gerada no SAT.');
+      Exit;
+    end;
+    if not Autorizada then
+    begin
+      ShowMessage('A nota fiscal ' + NumeroNF + ' ainda nao foi autorizada na ' +
+        'SEFAZ. Conclua a autorizacao no SAT antes de enviar.');
+      Exit;
+    end;
+    XMLNFe := BuscarXMLDaNF(Qry, IdNF);
+  finally
+    Qry.Free;
+  end;
+  if not LerDadosDoXMLNFe(XMLNFe, DadosNF, ErroMsg) then
+  begin
+    Log('Enviar NF do pedido ' + OrderSN + ': ' + ErroMsg);
+    ShowMessage(ErroMsg);
+    Exit;
+  end;
+  Log(Format('Enviar NF do pedido %s: NF %s serie %s, chave %s, OE %d de %s.',
+    [OrderSN, DadosNF.Numero, DadosNF.Serie, DadosNF.Chave, CodOE,
+     FormatDateTime('dd/mm/yyyy', DataOE)]));
 
   case TMarketplaces(FCodMarketplace) of
-
     TMarketplaces.Amazon:
-
       begin
-
-        // A Amazon quer o XML da NF-e (ja emitida no seu sistema fiscal),
-        // NAO um PDF - por isso o filtro do dialogo e' diferente do
-        // usado pra Shopee.
-
-        OpenDialog1.Filter := 'Arquivo XML (*.xml)|*.xml';
-
-        if not OpenDialog1.Execute then
-
-          Exit;
-
-        if MessageDlg('Confirma o envio do arquivo' + sLineBreak + OpenDialog1.FileName +
-
-             sLineBreak + 'como XML da nota fiscal do pedido ' + OrderSN + '?' + sLineBreak +
-
+        // A Amazon quer o XML da NF-e, NAO o PDF - vai o XML gravado pelo SAT.
+        if MessageDlg('Confirma o envio do XML da nota fiscal ' + DadosNF.Numero +
+             ' para o pedido ' + OrderSN + '?' + sLineBreak +
              '(ATENCAO: essa API exige aprovacao previa da Amazon - role "Tax Invoicing ' +
-
              'Restricted" - pode falhar com HTTP 403 se ainda nao tiver sido aprovada)',
-
              mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
-
           Exit;
-
         Screen.Cursor := crHourGlass;
-
         try
-
-          FileBytes := TFile.ReadAllBytes(OpenDialog1.FileName);
-
           ClienteAmazon := TAmazonSPAPIClient.Create(FDevClientId, FDevClientSecret, '',
-
             uMarketplace.AMAZON_MARKETPLACE_ID_BRASIL, FSandbox);
-
           ClienteAmazon.OnLog := Log;
-
           try
-
-            if ClienteAmazon.SubmitDeliveryInvoice(FToken, OrderSN, FileBytes, ErroMsg) then
-
-              ShowMessage('Nota fiscal enviada com sucesso para o pedido ' + OrderSN + '.')
-
+            if ClienteAmazon.SubmitDeliveryInvoice(FToken, OrderSN,
+                 TEncoding.UTF8.GetBytes(XMLNFe), ErroMsg) then
+            begin
+              Log('Nota fiscal ' + DadosNF.Numero + ' enviada para o pedido ' + OrderSN + '.');
+              RegistrarNFEnviada(OrderSN);
+              ShowMessage('Nota fiscal enviada com sucesso para o pedido ' + OrderSN + '.');
+            end
             else
-
-              begin
-
-                Log('Falha ao enviar nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
-
-                ShowMessage('Falha ao enviar nota fiscal: ' + ErroMsg);
-
-              end;
-
+            begin
+              Log('Falha ao enviar nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
+              ShowMessage('Falha ao enviar nota fiscal: ' + ErroMsg);
+            end;
           finally
-
             ClienteAmazon.Free;
-
           end;
-
         finally
-
           Screen.Cursor := crDefault;
-
         end;
-
       end;
-
   else
-
-    if TMarketplaces(FCodMarketplace) = TMarketplaces.Magalu then
-
-    begin
-
-      ShowMessage('Enviar Nota Fiscal ainda nao implementado para o Magalu. ' +
-
-        'Favor utilizar o Portal do Seller para essa operacao.');
-
-      Exit;
-
-    end;
-
-
-
-    OpenDialog1.Filter := 'Arquivo PDF (*.pdf)|*.pdf';
-
-    if not OpenDialog1.Execute then
-
-      Exit;
-
-
-
-    if MessageDlg('Confirma o envio do arquivo' + sLineBreak + OpenDialog1.FileName +
-
-         sLineBreak + 'como nota fiscal do pedido ' + OrderSN + '?',
-
+    // Shopee: primeiro os dados da NF-e (add_invoice_data), depois o PDF da
+    // DANFE gerado do XML pelo ACBr (upload_invoice_doc). Um nao depende do
+    // outro - se um falhar, o outro e' enviado mesmo assim e a mensagem
+    // final diz o que foi.
+    if MessageDlg('Confirma o envio da nota fiscal ' + DadosNF.Numero +
+         ' (dados da nota + PDF da DANFE) para o pedido ' + OrderSN + '?',
          mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
-
       Exit;
-
-
-
     Screen.Cursor := crHourGlass;
-
     try
-
-      FileBytes := TFile.ReadAllBytes(OpenDialog1.FileName);
-
-
-
+      Invoice.Number := DadosNF.Numero;
+      Invoice.SeriesNumber := DadosNF.Serie;
+      Invoice.AccessKey := DadosNF.Chave;
+      Invoice.IssueDate := DadosNF.DataEmissao;
+      Invoice.TotalValue := DadosNF.ValorTotal;
+      Invoice.ProductsTotalValue := DadosNF.ValorProdutos;
+      Invoice.TaxCode := DadosNF.CFOP;
       ClienteShopee := TShopeeOpenAPIClient.Create(StrToInt64Def(FDevClientId, 0),
-
         FDevClientSecret, '', FSandbox);
-
       ClienteShopee.OnLog := Log;
-
       try
-
-        if ClienteShopee.UploadInvoiceDoc(FToken, StrToInt64Def(FAccountID, 0),
-
-             OrderSN, FileBytes, ErroMsg) then
-
-          Log('Nota fiscal enviada com sucesso para o pedido ' + OrderSN + '.')
-
+        DadosOk := ClienteShopee.AddInvoiceData(FToken, StrToInt64Def(FAccountID, 0),
+          OrderSN, Invoice, ErroMsg);
+        if DadosOk then
+          Log('Dados da nota fiscal ' + DadosNF.Numero + ' informados para o pedido ' + OrderSN + '.')
         else
+          Log('Falha ao informar os dados da nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
 
-          Log('Falha ao enviar nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
-
+        PdfOk := GerarPDFDanfe(XMLNFe, PdfBytes, ErroMsg);
+        if not PdfOk then
+          Log('Enviar NF do pedido ' + OrderSN + ': ' + ErroMsg)
+        else
+        begin
+          Log(Format('PDF da DANFE gerado: %d bytes.', [Length(PdfBytes)]));
+          PdfOk := ClienteShopee.UploadInvoiceDoc(FToken, StrToInt64Def(FAccountID, 0),
+            OrderSN, PdfBytes, ErroMsg);
+          if PdfOk then
+            Log('PDF da nota fiscal ' + DadosNF.Numero + ' enviado para o pedido ' + OrderSN + '.')
+          else
+            Log('Falha ao enviar o PDF da nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
+        end;
       finally
-
         ClienteShopee.Free;
-
       end;
-
     finally
-
       Screen.Cursor := crDefault;
-
     end;
-
+    // So' conta como enviada com os dois envios aceitos pela Shopee.
+    if DadosOk and PdfOk then
+    begin
+      RegistrarNFEnviada(OrderSN);
+      ShowMessage('Nota fiscal ' + DadosNF.Numero + ' enviada com sucesso para o pedido ' +
+        OrderSN + ' (dados da nota e PDF).');
+    end
+    else
+      ShowMessage('Envio da nota fiscal ' + DadosNF.Numero + ' para o pedido ' + OrderSN +
+        ' terminou com falha:' + sLineBreak +
+        '- Dados da nota: ' + IfThen(DadosOk, 'enviados', 'FALHOU') + sLineBreak +
+        '- PDF da DANFE: ' + IfThen(PdfOk, 'enviado', 'FALHOU') + sLineBreak + sLineBreak +
+        'O motivo esta no log da tela.');
   end;
-
+  // {NAO IMPLEMENTADO - 04/11/2026} Mercado Livre, TikTok Shop e Magalu:
+  // - Mercado Livre: o cliente da API (MercadoLivre.OpenAPI.Client) nao tem
+  //   nenhum metodo de nota fiscal, e o caminho de NF no ML depende do modo
+  //   de envio do pedido (e de o lojista usar ou nao o Faturador do proprio
+  //   ML) - precisa ser levantado antes.
+  // - TikTok Shop: a lista de scopes do app (cabecalho de
+  //   TikTokShop.OpenAPI.Client) nao tem scope de nota fiscal; incluir scope
+  //   novo obriga todos os lojistas a reautorizar o app. E nada do TikTok foi
+  //   testado com pedido real ainda.
+  // - Magalu: o cliente da API nao tem endpoint de nota fiscal levantado e a
+  //   conta real ainda nao foi aprovada pra teste.
 end;
 
 
@@ -5346,6 +5558,8 @@ begin
         Log('Pedido ' + OrderSN + ' baixado no SAT com sucesso.');
 
         ShowMessage('Pedido baixado no SAT com sucesso!');
+
+        PreencherSituacaoPedidos; // mostra ID OE / Data OE e "ja baixado" na linha
 
         GridClick(Self); // reavalia os botoes (esse pedido agora ja foi baixado)
 

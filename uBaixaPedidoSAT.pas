@@ -54,6 +54,13 @@ const
   // codigo referencia esta constante.
   PROCEDURE_VENDA_EMITIR = 'VENDA_EMITIR_251103A';
 
+  // Marca da NF ainda nao autorizada na SEFAZ na coluna NF da tela de
+  // pedidos - o botao "Enviar NF" fica desabilitado enquanto ela aparecer.
+  SUFIXO_NF_NAO_AUTORIZADA = ' (não autorizada)';
+
+  // Marca da NF ja enviada ao marketplace pelo botao "Enviar Nota Fiscal".
+  SUFIXO_NF_ENVIADA = ' (enviada)';
+
 type
   // Um par (nome do campo em portugues/referencia, valor vindo da API) -
   // usado pra montar os campos OBS no formato pedido pelo cliente:
@@ -153,13 +160,39 @@ type
 function PedidoJaBaixado(AQuery: TFDQuery; const ALoja, ACodMarketplace: Integer;
   const ACodPedidoMarketplace: string): Boolean;
 
+// Dados da baixa do pedido para a tela de pedidos (04/11/2026): a OE gerada
+// (OE_PEDIDOS.CODOE + DATA) e a NF que o SAT gera depois em cima dessa OE.
+// Devolve False se o pedido ainda nao foi baixado. ANF fica '' enquanto a NF
+// nao for gerada (ou se so' houver NF cancelada); NF ainda nao autorizada na
+// SEFAZ vem com SUFIXO_NF_NAO_AUTORIZADA no fim. ADataEnvioNF = quando o
+// botao "Enviar Nota Fiscal" enviou a NF ao marketplace (0 = nao enviada).
+function BuscarBaixaDoPedido(AQuery: TFDQuery; const ALoja, ACodMarketplace: Integer;
+  const ACodPedidoMarketplace: string; out ACodOE: Integer;
+  out ADataOE: TDateTime; out ANF: string; out ADataEnvioNF: TDateTime): Boolean;
+
+// Registra em OE_PEDIDOS.DATA_ENVIO_NF que a NF do pedido foi enviada ao
+// marketplace (04/11/2026) - a tela deixa de mostrar o pedido quando ele
+// estiver finalizado e com a NF enviada.
+procedure MarcarNFEnviada(AQuery: TFDQuery; const ALoja, ACodMarketplace: Integer;
+  const ACodPedidoMarketplace: string);
+
+// NF de saida da OE, sem as canceladas. Se houver mais de uma, a NF-e
+// (NFETIPO 'N') vem antes da NFC-e ('C') e, entre iguais, a mais recente.
+// Devolve False se a OE ainda nao tem NF.
+function BuscarNFDaOE(AQuery: TFDQuery; const ACodOE: Integer;
+  const ADataOE: TDateTime; out AIdNF: Integer; out ANumeroNF: string;
+  out AAutorizada: Boolean): Boolean;
+
+// XML da NF-e gravado pelo SAT (NF.NFEXML).
+function BuscarXMLDaNF(AQuery: TFDQuery; const AIdNF: Integer): string;
+
 // Monta o texto do campo OBS no formato pedido pelo cliente:
 // "Nome do Campo -> Valor da API" (um por linha). Pula pares cujo Valor
 // esteja vazio, pra nao poluir o campo com linhas sem informacao.
 function MontarTextoObs(const ACampos: TCamposObsArray): string;
 
 // Executa a baixa completa (OE + IOE + PGTOS + VENDA_EMITIR_251103A +
-// MARKETPLACE_PEDIDOS) dentro de uma unica transacao. ARetornoProcedure e
+// OE_PEDIDOS) dentro de uma unica transacao. ARetornoProcedure e
 // AErroInformacaoAdicional sao os 2 valores de retorno REAIS da procedure
 // VENDA_EMITIR_251103A (RETORNO INTEGER, ERROINFORMACAOADICIONAL
 // VARCHAR(1024)) - sempre preenchidos quando a procedure chega a ser
@@ -206,7 +239,7 @@ function PedidoJaBaixado(AQuery: TFDQuery; const ALoja, ACodMarketplace: Integer
 begin
   AQuery.Close;
   AQuery.SQL.Text :=
-    'SELECT ID FROM MARKETPLACE_PEDIDOS ' +
+    'SELECT ID FROM OE_PEDIDOS ' +
     'WHERE LOJA = :LOJA AND COD_MARKETPLACE = :COD_MARKETPLACE ' +
     'AND COD_PEDIDO_MARKETPLACE = :COD_PEDIDO_MARKETPLACE';
   AQuery.ParamByName('LOJA').AsInteger := ALoja;
@@ -215,6 +248,102 @@ begin
   AQuery.Open;
   try
     Result := not AQuery.IsEmpty;
+  finally
+    AQuery.Close;
+  end;
+end;
+
+function BuscarBaixaDoPedido(AQuery: TFDQuery; const ALoja, ACodMarketplace: Integer;
+  const ACodPedidoMarketplace: string; out ACodOE: Integer;
+  out ADataOE: TDateTime; out ANF: string; out ADataEnvioNF: TDateTime): Boolean;
+var
+  IdNF: Integer;
+  Autorizada: Boolean;
+begin
+  ACodOE := 0;
+  ADataOE := 0;
+  ANF := '';
+  ADataEnvioNF := 0;
+  AQuery.Close;
+  AQuery.SQL.Text :=
+    'SELECT CODOE, DATA, DATA_ENVIO_NF FROM OE_PEDIDOS ' +
+    'WHERE LOJA = :LOJA AND COD_MARKETPLACE = :COD_MARKETPLACE ' +
+    'AND COD_PEDIDO_MARKETPLACE = :COD_PEDIDO_MARKETPLACE';
+  AQuery.ParamByName('LOJA').AsInteger := ALoja;
+  AQuery.ParamByName('COD_MARKETPLACE').AsInteger := ACodMarketplace;
+  AQuery.ParamByName('COD_PEDIDO_MARKETPLACE').AsString := ACodPedidoMarketplace;
+  AQuery.Open;
+  try
+    Result := not AQuery.IsEmpty;
+    if Result then
+    begin
+      ACodOE := AQuery.FieldByName('CODOE').AsInteger;
+      ADataOE := AQuery.FieldByName('DATA').AsDateTime;
+      ADataEnvioNF := AQuery.FieldByName('DATA_ENVIO_NF').AsDateTime;
+    end;
+  finally
+    AQuery.Close;
+  end;
+  if not Result then
+    Exit;
+
+  if BuscarNFDaOE(AQuery, ACodOE, ADataOE, IdNF, ANF, Autorizada) and
+     not Autorizada then
+    ANF := ANF + SUFIXO_NF_NAO_AUTORIZADA;
+end;
+
+function BuscarNFDaOE(AQuery: TFDQuery; const ACodOE: Integer;
+  const ADataOE: TDateTime; out AIdNF: Integer; out ANumeroNF: string;
+  out AAutorizada: Boolean): Boolean;
+begin
+  AIdNF := 0;
+  ANumeroNF := '';
+  AAutorizada := False;
+  AQuery.Close;
+  AQuery.SQL.Text :=
+    'SELECT FIRST 1 ID, NF, NFECONFIRMADA FROM NF ' +
+    'WHERE ID_OE = :ID_OE AND DATA_OE = :DATA_OE ' +
+    'AND COALESCE(CANC, '''') <> ''S'' ' +
+    'AND COALESCE(ENTRADAOUSAIDA, ''S'') = ''S'' ' +
+    'ORDER BY IIF(NFETIPO = ''N'', 0, 1), ID DESC';
+  AQuery.ParamByName('ID_OE').AsInteger := ACodOE;
+  AQuery.ParamByName('DATA_OE').AsDateTime := ADataOE;
+  AQuery.Open;
+  try
+    Result := not AQuery.IsEmpty;
+    if Result then
+    begin
+      AIdNF := AQuery.FieldByName('ID').AsInteger;
+      ANumeroNF := AQuery.FieldByName('NF').AsString;
+      AAutorizada := AQuery.FieldByName('NFECONFIRMADA').AsString = 'S';
+    end;
+  finally
+    AQuery.Close;
+  end;
+end;
+
+procedure MarcarNFEnviada(AQuery: TFDQuery; const ALoja, ACodMarketplace: Integer;
+  const ACodPedidoMarketplace: string);
+begin
+  AQuery.Close;
+  AQuery.SQL.Text :=
+    'UPDATE OE_PEDIDOS SET DATA_ENVIO_NF = CURRENT_TIMESTAMP ' +
+    'WHERE LOJA = :LOJA AND COD_MARKETPLACE = :COD_MARKETPLACE ' +
+    'AND COD_PEDIDO_MARKETPLACE = :COD_PEDIDO_MARKETPLACE';
+  AQuery.ParamByName('LOJA').AsInteger := ALoja;
+  AQuery.ParamByName('COD_MARKETPLACE').AsInteger := ACodMarketplace;
+  AQuery.ParamByName('COD_PEDIDO_MARKETPLACE').AsString := ACodPedidoMarketplace;
+  AQuery.ExecSQL;
+end;
+
+function BuscarXMLDaNF(AQuery: TFDQuery; const AIdNF: Integer): string;
+begin
+  AQuery.Close;
+  AQuery.SQL.Text := 'SELECT NFEXML FROM NF WHERE ID = :ID';
+  AQuery.ParamByName('ID').AsInteger := AIdNF;
+  AQuery.Open;
+  try
+    Result := AQuery.FieldByName('NFEXML').AsString;
   finally
     AQuery.Close;
   end;
@@ -523,6 +652,7 @@ function BaixarPedidoSAT(AQuery: TFDQuery; const ADados: TDadosPedidoSAT;
   out AErrorMessage: string): Boolean;
 var
   CodOE: Integer;
+  DataOE: TDateTime;
   CodCli: Integer;
   I: Integer;
   CodProdutoItem: Integer;
@@ -608,7 +738,7 @@ begin
       ':FRETE, :MOTIVO_E, :DATA_ENT, :CODCLI, :OBS, :ACRESCIMOFINANCEIRO, ' +
       // TIPO fixo 'O' pra todos os marketplaces (pedido do cliente, 26/10/2026).
       '''O'', :DIG) ' +
-      'RETURNING ID_OE';
+      'RETURNING ID_OE, DATA';
     // DIG = nome do marketplace de origem ("Shopee", "Mercado Livre"...),
     // pedido do cliente 26/10/2026. Coluna VARCHAR(25) - o maior nome hoje
     // tem 13 caracteres.
@@ -643,8 +773,14 @@ begin
     AQuery.ParamByName('ACRESCIMOFINANCEIRO').AsFloat := 0;
     // RETURNING no Firebird devolve um mini-resultset de 1 linha - usa
     // .Open (nao .ExecSQL) pra conseguir ler o ID_OE gerado.
+    // A PK da OE e' ID_OE + DATA: a DATA devolvida aqui e' a que vai pra
+    // IOE, PGTOS, procedure e OE_PEDIDOS (04/11/2026). Antes IOE/PGTOS
+    // usavam CURRENT_DATE de novo e a procedure o Date da estacao - com o
+    // relogio da estacao diferente do servidor, ou a baixa passando da
+    // meia-noite, as datas nao batiam.
     AQuery.Open;
     CodOE := AQuery.FieldByName('ID_OE').AsInteger;
+    DataOE := AQuery.FieldByName('DATA').AsDateTime;
     AQuery.Close;
 
     //Inclusão tela de Itens do pedido... INSERT INTO IOE
@@ -676,7 +812,7 @@ begin
         'INSERT INTO IOE (DATA, ID_OE, ID_ITEM, COD, CODIGODEBARRAS, ' +
         'TAMANHO, QUANT, PRECODEVENDA, VALOR, VCON, LBRU, OBS, LOJAENTR, ' +
         'QUANT_EMBALAGEM, PRECODECUSTO, VALORTOTAL) ' +
-        'VALUES (CURRENT_DATE, :ID_OE, :ID_ITEM, :COD, :CODIGODEBARRAS, ' +
+        'VALUES (:DATA, :ID_OE, :ID_ITEM, :COD, :CODIGODEBARRAS, ' +
         ':TAMANHO, :QUANT, :PRECODEVENDA, :VALOR, :VCON, :LBRU, :OBS, :LOJAENTR, ' +
         ':QUANT_EMBALAGEM, :PRECODECUSTO, :VALORTOTAL)';
       AQuery.ParamByName('QUANT_EMBALAGEM').AsFloat := QtdeEmbalagemItem;
@@ -688,6 +824,7 @@ begin
       // VALORTOTAL = valor x quantidade, o mesmo que VCON.
       AQuery.ParamByName('PRECODECUSTO').AsFloat := CustoItem;
       AQuery.ParamByName('VALORTOTAL').AsFloat := VConItem;
+      AQuery.ParamByName('DATA').AsDateTime := DataOE;
       AQuery.ParamByName('ID_OE').AsInteger := CodOE;
       AQuery.ParamByName('LOJAENTR').AsInteger := LojaEntrega;
       AQuery.ParamByName('ID_ITEM').AsInteger := ProximoIdItem;
@@ -717,7 +854,8 @@ begin
     AQuery.Close;
     AQuery.SQL.Text :=
       'INSERT INTO PGTOS (DATA, ID_OE, ID_PG, ENT, VALOR_CON, VALOR_PG, NOME) ' +
-      'VALUES (CURRENT_DATE, :ID_OE, 1, :ENT, :VALOR_CON, :VALOR_PG, :NOME)';
+      'VALUES (:DATA, :ID_OE, 1, :ENT, :VALOR_CON, :VALOR_PG, :NOME)';
+    AQuery.ParamByName('DATA').AsDateTime := DataOE;
     AQuery.ParamByName('ID_OE').AsInteger := CodOE;
     // Nome do cliente no pagamento (pedido do cliente 28/10/2026) - coluna
     // VARCHAR(50).
@@ -743,7 +881,7 @@ begin
     AQuery.SQL.Text := 'EXECUTE PROCEDURE ' + PROCEDURE_VENDA_EMITIR +
       '(:CODOE, :DATAHOJE)';
     AQuery.ParamByName('CODOE').AsInteger := CodOE;
-    AQuery.ParamByName('DATAHOJE').AsDateTime := Date;
+    AQuery.ParamByName('DATAHOJE').AsDateTime := DataOE;
     AQuery.Open;
     ARetornoProcedure := AQuery.FieldByName('RETORNO').AsInteger;
     AErroInformacaoAdicional := AQuery.FieldByName('ERROINFORMACAOADICIONAL').AsString;
@@ -766,13 +904,15 @@ begin
     // deixar lixo pra tras.
     AQuery.Close;
     AQuery.SQL.Text :=
-      'INSERT INTO MARKETPLACE_PEDIDOS (LOJA, COD_MARKETPLACE, ' +
-      'COD_PEDIDO_MARKETPLACE, CODOE, DATABAIXA) VALUES ' +
-      '(:LOJA, :COD_MARKETPLACE, :COD_PEDIDO_MARKETPLACE, :CODOE, :DATABAIXA)';
+      'INSERT INTO OE_PEDIDOS (LOJA, COD_MARKETPLACE, ' +
+      'COD_PEDIDO_MARKETPLACE, CODOE, DATA, DATABAIXA) VALUES ' +
+      '(:LOJA, :COD_MARKETPLACE, :COD_PEDIDO_MARKETPLACE, :CODOE, :DATA, :DATABAIXA)';
     AQuery.ParamByName('LOJA').AsInteger := ADados.Loja;
     AQuery.ParamByName('COD_MARKETPLACE').AsInteger := ADados.CodMarketplace;
     AQuery.ParamByName('COD_PEDIDO_MARKETPLACE').AsString := ADados.CodPedidoMarketplace;
+    // CODOE + DATA = PK da OE (UK_OE_PEDIDOS_OE impede duas baixas na mesma OE)
     AQuery.ParamByName('CODOE').AsInteger := CodOE;
+    AQuery.ParamByName('DATA').AsDateTime := DataOE;
     AQuery.ParamByName('DATABAIXA').AsDateTime := Now;
     AQuery.ExecSQL;
 
