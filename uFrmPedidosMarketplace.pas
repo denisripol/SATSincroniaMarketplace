@@ -3503,9 +3503,8 @@ var
   OrderSN, ErroMsg, NumeroNF, XMLNFe, NFNaGrade: string;
   CodOE, IdNF: Integer;
   DataOE, DataEnvioNF: TDateTime;
-  Autorizada, PdfOk: Boolean;
+  Autorizada, EnvioOk: Boolean;
   DadosNF: TDadosNotaFiscal;
-  PdfBytes: TBytes;
 begin
   if AcaoIndisponivelNesteMarketplace('Enviar Nota Fiscal') then
     Exit;
@@ -3612,51 +3611,66 @@ begin
         end;
       end;
   else
-    // Shopee: PDF da DANFE gerado do XML pelo ACBr, enviado pelo
-    // upload_invoice_doc (documentado pra vendedor local do Brasil, 10/11/2026).
-    // {DECISAO - 10/11/2026} NAO chama mais o add_invoice_data: ele nao e'
-    // API publica (a pagina da documentacao diz que nenhum tipo de app pode
-    // chama-lo) e, no teste real, recusou ate pedido em READY_TO_SHIP com
-    // INVOICE_STATUS_INVALID. A chave/numero da nota vao dentro do proprio
-    // documento enviado.
+    // Shopee: XML da NF-e (gravado pelo SAT em NF.NFEXML) pelo
+    // upload_invoice_doc, file_type 4 - conforme o guia da Shopee pra
+    // vendedor do Brasil, "Como subir a NF-e atraves da OpenAPI"
+    // (10/11/2026). No teste real, PDF (file_type 1) dava "File error.".
+    // {DECISAO - 10/11/2026} NAO chama o add_invoice_data: nao e' API
+    // publica e recusou ate pedido em READY_TO_SHIP.
+    // So' NF-e modelo 55 - a Shopee recusa outro modelo.
+    if DadosNF.Modelo <> 55 then
+    begin
+      ShowMessage('A nota fiscal ' + DadosNF.Numero + ' não é NF-e (modelo ' +
+        IntToStr(DadosNF.Modelo) + '). A Shopee só aceita NF-e modelo 55.');
+      Exit;
+    end;
+    // A Shopee pede 5 minutos entre a emissao e o envio (validacao da NF-e
+    // na SERPRO); antes disso ela pode recusar a nota como invalida.
+    if (DadosNF.DataEmissao > 0) and (MinutesBetween(Now, DadosNF.DataEmissao) < 5) and
+       (Now > DadosNF.DataEmissao) then
+      if MessageDlg('A nota fiscal ' + DadosNF.Numero + ' foi emitida há menos de 5 ' +
+           'minutos. A Shopee pede para aguardar 5 minutos após a emissão antes de ' +
+           'enviar, senão pode recusar a nota.' + sLineBreak + sLineBreak +
+           'Enviar mesmo assim?', mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
+        Exit;
     if MessageDlg('Confirma o envio da nota fiscal ' + DadosNF.Numero +
-         ' (PDF da DANFE) para o pedido ' + OrderSN + '?',
+         ' (XML da NF-e) para o pedido ' + OrderSN + '?',
          mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
       Exit;
     Screen.Cursor := crHourGlass;
     try
-      PdfOk := GerarPDFDanfe(XMLNFe, PdfBytes, ErroMsg);
-      if not PdfOk then
-        Log('Enviar NF do pedido ' + OrderSN + ': ' + ErroMsg)
-      else
-      begin
-        Log(Format('PDF da DANFE gerado: %d bytes.', [Length(PdfBytes)]));
-        ClienteShopee := TShopeeOpenAPIClient.Create(StrToInt64Def(FDevClientId, 0),
-          FDevClientSecret, '', FSandbox);
-        ClienteShopee.OnLog := Log;
-        try
-          PdfOk := ClienteShopee.UploadInvoiceDoc(FToken, StrToInt64Def(FAccountID, 0),
-            OrderSN, PdfBytes, ErroMsg);
-        finally
-          ClienteShopee.Free;
-        end;
-        if PdfOk then
-          Log('PDF da nota fiscal ' + DadosNF.Numero + ' enviado para o pedido ' + OrderSN + '.')
-        else
-          Log('Falha ao enviar o PDF da nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
+      ClienteShopee := TShopeeOpenAPIClient.Create(StrToInt64Def(FDevClientId, 0),
+        FDevClientSecret, '', FSandbox);
+      ClienteShopee.OnLog := Log;
+      try
+        EnvioOk := ClienteShopee.UploadInvoiceDoc(FToken, StrToInt64Def(FAccountID, 0),
+          OrderSN, XMLNFe, ErroMsg);
+      finally
+        ClienteShopee.Free;
       end;
     finally
       Screen.Cursor := crDefault;
     end;
-    if PdfOk then
+    if EnvioOk then
     begin
+      Log('XML da nota fiscal ' + DadosNF.Numero + ' enviado para o pedido ' + OrderSN + '.');
       RegistrarNFEnviada(OrderSN);
       ShowMessage('Nota fiscal ' + DadosNF.Numero + ' enviada com sucesso para o pedido ' +
         OrderSN + '.');
     end
     else
+    begin
+      Log('Falha ao enviar a nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
+      // Motivo explicado no guia da Shopee: transportadora sem suporte a
+      // NF-e (ex.: Correios) ou pedido cancelado.
+      if ContainsText(ErroMsg, 'invoice status is invalid') then
+        ErroMsg := ErroMsg + sLineBreak + sLineBreak + 'Segundo a Shopee, isso ' +
+          'acontece quando a transportadora do pedido não aceita NF-e (ex.: ' +
+          'Correios) ou quando o pedido está cancelado. Se não estiver cancelado, ' +
+          'é só Despachar o pedido.';
       ShowMessage('Falha ao enviar a nota fiscal ' + DadosNF.Numero + ' para o pedido ' +
         OrderSN + ': ' + ErroMsg);
+    end;
   end;
   // {NAO IMPLEMENTADO - 04/11/2026} Mercado Livre, TikTok Shop e Magalu:
   // - Mercado Livre: o cliente da API (MercadoLivre.OpenAPI.Client) nao tem

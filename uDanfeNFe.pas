@@ -33,6 +33,7 @@ type
     ValorTotal: Double;       // vNF
     ValorProdutos: Double;    // vProd
     CFOP: string;             // CFOP do primeiro item
+    Modelo: Integer;          // 55 = NF-e, 65 = NFC-e
   end;
 
 // Le os dados principais da nota direto do XML.
@@ -81,6 +82,7 @@ begin
       Nota := ACBr.NotasFiscais[0].NFe;
       ADados.Numero := IntToStr(Nota.Ide.nNF);
       ADados.Serie := IntToStr(Nota.Ide.serie);
+      ADados.Modelo := Nota.Ide.modelo;
       ADados.Chave := StringReplace(Nota.infNFe.ID, 'NFe', '', [rfIgnoreCase]);
       // Na NF-e 4.00 o dEmi do ACBr guarda o dhEmi (data e hora).
       ADados.DataEmissao := Nota.Ide.dEmi;
