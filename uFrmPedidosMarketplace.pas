@@ -3495,6 +3495,33 @@ end;
 
 
 
+// invoice_data do pedido (response.order_list[0].invoice_data do
+// get_order_detail) em JSON, ou '(nao veio)'. So' pra log do "Enviar NF".
+function InvoiceDataDoPedidoShopee(const ARawJSON: string): string;
+var
+  Root: TJSONValue;
+  RespObj, OrderObj, InvoiceObj: TJSONObject;
+  OrderListArr: TJSONArray;
+begin
+  Result := '(nao veio)';
+  Root := TJSONObject.ParseJSONValue(ARawJSON);
+  if not Assigned(Root) then
+    Exit;
+  try
+    if (Root is TJSONObject) and
+       TJSONObject(Root).TryGetValue<TJSONObject>('response', RespObj) and
+       RespObj.TryGetValue<TJSONArray>('order_list', OrderListArr) and
+       (OrderListArr.Count > 0) and (OrderListArr.Items[0] is TJSONObject) then
+    begin
+      OrderObj := TJSONObject(OrderListArr.Items[0]);
+      if OrderObj.TryGetValue<TJSONObject>('invoice_data', InvoiceObj) then
+        Result := InvoiceObj.ToJSON;
+    end;
+  finally
+    Root.Free;
+  end;
+end;
+
 procedure TFrmPedidosMarketplace.CmdEnviarNFClick(Sender: TObject);
 var
   Qry: TFDQuery;
@@ -3505,6 +3532,7 @@ var
   DataOE, DataEnvioNF: TDateTime;
   Autorizada, DadosOk, PdfOk: Boolean;
   DadosNF: TDadosNotaFiscal;
+  DetalheShopee: TShopeeOrderDetail;
   Invoice: TShopeeInvoiceData;
   PdfBytes: TBytes;
 begin
@@ -3634,6 +3662,17 @@ begin
         FDevClientSecret, '', FSandbox);
       ClienteShopee.OnLog := Log;
       try
+        // Diagnostico (10/11/2026): no 1o teste real a Shopee recusou os
+        // dados com "invoice status is invalid ... INVOICE_STATUS_INVALID".
+        // Registra o status do pedido e o invoice_data que a Shopee tem
+        // agora, pra saber em que momento ela aceita a nota.
+        if ClienteShopee.GetOrderDetail(FToken, StrToInt64Def(FAccountID, 0),
+             OrderSN, DetalheShopee, ErroMsg) then
+          Log('Pedido ' + OrderSN + ' na Shopee: status ' + DetalheShopee.OrderStatus +
+            ', invoice_data ' + InvoiceDataDoPedidoShopee(DetalheShopee.RawJSON))
+        else
+          Log('Aviso: nao foi possivel consultar o pedido ' + OrderSN +
+            ' na Shopee antes do envio da NF (' + ErroMsg + ').');
         DadosOk := ClienteShopee.AddInvoiceData(FToken, StrToInt64Def(FAccountID, 0),
           OrderSN, Invoice, ErroMsg);
         if DadosOk then
