@@ -3495,33 +3495,6 @@ end;
 
 
 
-// invoice_data do pedido (response.order_list[0].invoice_data do
-// get_order_detail) em JSON, ou '(nao veio)'. So' pra log do "Enviar NF".
-function InvoiceDataDoPedidoShopee(const ARawJSON: string): string;
-var
-  Root: TJSONValue;
-  RespObj, OrderObj, InvoiceObj: TJSONObject;
-  OrderListArr: TJSONArray;
-begin
-  Result := '(nao veio)';
-  Root := TJSONObject.ParseJSONValue(ARawJSON);
-  if not Assigned(Root) then
-    Exit;
-  try
-    if (Root is TJSONObject) and
-       TJSONObject(Root).TryGetValue<TJSONObject>('response', RespObj) and
-       RespObj.TryGetValue<TJSONArray>('order_list', OrderListArr) and
-       (OrderListArr.Count > 0) and (OrderListArr.Items[0] is TJSONObject) then
-    begin
-      OrderObj := TJSONObject(OrderListArr.Items[0]);
-      if OrderObj.TryGetValue<TJSONObject>('invoice_data', InvoiceObj) then
-        Result := InvoiceObj.ToJSON;
-    end;
-  finally
-    Root.Free;
-  end;
-end;
-
 procedure TFrmPedidosMarketplace.CmdEnviarNFClick(Sender: TObject);
 var
   Qry: TFDQuery;
@@ -3530,10 +3503,8 @@ var
   OrderSN, ErroMsg, NumeroNF, XMLNFe, NFNaGrade: string;
   CodOE, IdNF: Integer;
   DataOE, DataEnvioNF: TDateTime;
-  Autorizada, DadosOk, PdfOk: Boolean;
+  Autorizada, PdfOk: Boolean;
   DadosNF: TDadosNotaFiscal;
-  DetalheShopee: TShopeeOrderDetail;
-  Invoice: TShopeeInvoiceData;
   PdfBytes: TBytes;
 begin
   if AcaoIndisponivelNesteMarketplace('Enviar Nota Fiscal') then
@@ -3641,77 +3612,51 @@ begin
         end;
       end;
   else
-    // Shopee: primeiro os dados da NF-e (add_invoice_data), depois o PDF da
-    // DANFE gerado do XML pelo ACBr (upload_invoice_doc). Um nao depende do
-    // outro - se um falhar, o outro e' enviado mesmo assim e a mensagem
-    // final diz o que foi.
+    // Shopee: PDF da DANFE gerado do XML pelo ACBr, enviado pelo
+    // upload_invoice_doc (documentado pra vendedor local do Brasil, 10/11/2026).
+    // {DECISAO - 10/11/2026} NAO chama mais o add_invoice_data: ele nao e'
+    // API publica (a pagina da documentacao diz que nenhum tipo de app pode
+    // chama-lo) e, no teste real, recusou ate pedido em READY_TO_SHIP com
+    // INVOICE_STATUS_INVALID. A chave/numero da nota vao dentro do proprio
+    // documento enviado.
     if MessageDlg('Confirma o envio da nota fiscal ' + DadosNF.Numero +
-         ' (dados da nota + PDF da DANFE) para o pedido ' + OrderSN + '?',
+         ' (PDF da DANFE) para o pedido ' + OrderSN + '?',
          mtConfirmation, [mbYes, mbNo], 0) <> mrYes then
       Exit;
     Screen.Cursor := crHourGlass;
     try
-      Invoice.Number := DadosNF.Numero;
-      Invoice.SeriesNumber := DadosNF.Serie;
-      Invoice.AccessKey := DadosNF.Chave;
-      Invoice.IssueDate := DadosNF.DataEmissao;
-      Invoice.TotalValue := DadosNF.ValorTotal;
-      Invoice.ProductsTotalValue := DadosNF.ValorProdutos;
-      Invoice.TaxCode := DadosNF.CFOP;
-      ClienteShopee := TShopeeOpenAPIClient.Create(StrToInt64Def(FDevClientId, 0),
-        FDevClientSecret, '', FSandbox);
-      ClienteShopee.OnLog := Log;
-      try
-        // Diagnostico (10/11/2026): no 1o teste real a Shopee recusou os
-        // dados com "invoice status is invalid ... INVOICE_STATUS_INVALID".
-        // Registra o status do pedido e o invoice_data que a Shopee tem
-        // agora, pra saber em que momento ela aceita a nota.
-        if ClienteShopee.GetOrderDetail(FToken, StrToInt64Def(FAccountID, 0),
-             OrderSN, DetalheShopee, ErroMsg) then
-          Log('Pedido ' + OrderSN + ' na Shopee: status ' + DetalheShopee.OrderStatus +
-            ', invoice_data ' + InvoiceDataDoPedidoShopee(DetalheShopee.RawJSON))
-        else
-          Log('Aviso: nao foi possivel consultar o pedido ' + OrderSN +
-            ' na Shopee antes do envio da NF (' + ErroMsg + ').');
-        DadosOk := ClienteShopee.AddInvoiceData(FToken, StrToInt64Def(FAccountID, 0),
-          OrderSN, Invoice, ErroMsg);
-        if DadosOk then
-          Log('Dados da nota fiscal ' + DadosNF.Numero + ' informados para o pedido ' + OrderSN + '.')
-        else
-          Log('Falha ao informar os dados da nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
-
-        PdfOk := GerarPDFDanfe(XMLNFe, PdfBytes, ErroMsg);
-        if not PdfOk then
-          Log('Enviar NF do pedido ' + OrderSN + ': ' + ErroMsg)
-        else
-        begin
-          Log(Format('PDF da DANFE gerado: %d bytes.', [Length(PdfBytes)]));
+      PdfOk := GerarPDFDanfe(XMLNFe, PdfBytes, ErroMsg);
+      if not PdfOk then
+        Log('Enviar NF do pedido ' + OrderSN + ': ' + ErroMsg)
+      else
+      begin
+        Log(Format('PDF da DANFE gerado: %d bytes.', [Length(PdfBytes)]));
+        ClienteShopee := TShopeeOpenAPIClient.Create(StrToInt64Def(FDevClientId, 0),
+          FDevClientSecret, '', FSandbox);
+        ClienteShopee.OnLog := Log;
+        try
           PdfOk := ClienteShopee.UploadInvoiceDoc(FToken, StrToInt64Def(FAccountID, 0),
             OrderSN, PdfBytes, ErroMsg);
-          if PdfOk then
-            Log('PDF da nota fiscal ' + DadosNF.Numero + ' enviado para o pedido ' + OrderSN + '.')
-          else
-            Log('Falha ao enviar o PDF da nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
+        finally
+          ClienteShopee.Free;
         end;
-      finally
-        ClienteShopee.Free;
+        if PdfOk then
+          Log('PDF da nota fiscal ' + DadosNF.Numero + ' enviado para o pedido ' + OrderSN + '.')
+        else
+          Log('Falha ao enviar o PDF da nota fiscal do pedido ' + OrderSN + ': ' + ErroMsg);
       end;
     finally
       Screen.Cursor := crDefault;
     end;
-    // So' conta como enviada com os dois envios aceitos pela Shopee.
-    if DadosOk and PdfOk then
+    if PdfOk then
     begin
       RegistrarNFEnviada(OrderSN);
       ShowMessage('Nota fiscal ' + DadosNF.Numero + ' enviada com sucesso para o pedido ' +
-        OrderSN + ' (dados da nota e PDF).');
+        OrderSN + '.');
     end
     else
-      ShowMessage('Envio da nota fiscal ' + DadosNF.Numero + ' para o pedido ' + OrderSN +
-        ' terminou com falha:' + sLineBreak +
-        '- Dados da nota: ' + IfThen(DadosOk, 'enviados', 'FALHOU') + sLineBreak +
-        '- PDF da DANFE: ' + IfThen(PdfOk, 'enviado', 'FALHOU') + sLineBreak + sLineBreak +
-        'O motivo esta no log da tela.');
+      ShowMessage('Falha ao enviar a nota fiscal ' + DadosNF.Numero + ' para o pedido ' +
+        OrderSN + ': ' + ErroMsg);
   end;
   // {NAO IMPLEMENTADO - 04/11/2026} Mercado Livre, TikTok Shop e Magalu:
   // - Mercado Livre: o cliente da API (MercadoLivre.OpenAPI.Client) nao tem

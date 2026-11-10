@@ -58,7 +58,7 @@ const
     '2. READY_TO_SHIP - Pago, pronto para despachar.'#13#10 +
     '   a) Baixar Pedido SAT'#13#10 +
     '   b) Emitir a nota fiscal no SAT'#13#10 +
-    '   c) Enviar Nota Fiscal (envia os dados da nota e o PDF da DANFE)'#13#10 +
+    '   c) Enviar Nota Fiscal (envia o PDF da DANFE)'#13#10 +
     '   d) Despachar'#13#10 +
     #13#10 +
     '3. PROCESSED - Envio organizado, aguardando a transportadora coletar.'#13#10 +
