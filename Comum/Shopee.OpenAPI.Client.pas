@@ -266,8 +266,9 @@ type
     function DownloadShippingDocument(const AAccessToken: string; AShopID: Int64;
       const AOrderSN: string; out APdfBytes: TBytes; out AErrorMessage: string): Boolean;
     // --- Nota Fiscal (Invoice - Brasil) ---
+    // Envia o XML da NF-e do pedido (Brasil) - ver UploadInvoiceDoc.
     function UploadInvoiceDoc(const AAccessToken: string; AShopID: Int64;
-      const AOrderSN: string; const APdfBytes: TBytes; out AErrorMessage: string): Boolean;
+      const AOrderSN, AXmlNFe: string; out AErrorMessage: string): Boolean;
     function DownloadInvoiceDoc(const AAccessToken: string; AShopID: Int64;
       const AOrderSN: string; out APdfBytes: TBytes; out AErrorMessage: string): Boolean;
     property OnLog: TShopeeLogEvent read FOnLog write FOnLog;
@@ -2591,14 +2592,24 @@ begin
     end;
   end;
 end;
+// {CONFIRMADO - 10/11/2026} guia "Como subir a NF-e atraves da OpenAPI"
+// (developer-guide/382 do Shopee Open Platform): no Brasil a NF-e vai como
+// XML pelo upload_invoice_doc, file_type 4, arquivo no campo "file" (limite
+// de 1 MB). So' modelo 55. "File Error" = XML sem a declaracao
+// <?xml version="1.0" encoding="UTF-8"?> - por isso a declaracao e'
+// garantida abaixo. Com PDF (file_type 1) a Shopee tambem respondia
+// "File error." no teste real.
 function TShopeeOpenAPIClient.UploadInvoiceDoc(const AAccessToken: string;
-  AShopID: Int64; const AOrderSN: string; const APdfBytes: TBytes;
+  AShopID: Int64; const AOrderSN, AXmlNFe: string;
   out AErrorMessage: string): Boolean;
 const
   API_PATH = '/api/v2/order/upload_invoice_doc';
+  DECLARACAO_XML = '<?xml version="1.0" encoding="UTF-8"?>';
 var
   Timestamp: Int64;
-  Sign, URL: string;
+  Sign, URL, Xml: string;
+  XmlBytes: TBytes;
+  FimDeclaracao: Integer;
   MultipartData: TMultipartFormData;
   Response: IHTTPResponse;
   ResponseStr: string;
@@ -2606,10 +2617,22 @@ var
   JSONObj: TJSONObject;
 begin
   // multipart/form-data, mesmo padrao do upload de imagem de produto desta
-  // unit. Formato conferido na documentacao em 10/11/2026 (ver file_type
-  // abaixo); a resposta bruta da Shopee sai no log.
+  // unit; a resposta bruta da Shopee sai no log.
   Result := False;
   AErrorMessage := '';
+  // Declaracao sempre UTF-8 (os bytes vao em UTF-8 sem BOM): tira a que
+  // vier no XML gravado - pode faltar ou declarar outro encoding.
+  Xml := Trim(AXmlNFe);
+  if Xml.StartsWith(#$FEFF) then
+    Xml := Xml.Substring(1);
+  if Xml.StartsWith('<?xml') then
+  begin
+    FimDeclaracao := Pos('?>', Xml);
+    if FimDeclaracao > 0 then
+      Xml := TrimLeft(Copy(Xml, FimDeclaracao + 2, MaxInt));
+  end;
+  Xml := DECLARACAO_XML + Xml;
+  XmlBytes := TEncoding.UTF8.GetBytes(Xml);
   Timestamp := DateTimeToUnix(TTimeZone.Local.ToUniversalTime(Now));
   Sign := ComputeSign(API_PATH, Timestamp, AAccessToken, AShopID);
   URL := BaseURL + API_PATH +
@@ -2621,15 +2644,13 @@ begin
   MultipartData := TMultipartFormData.Create;
   try
     MultipartData.AddField('order_sn', AOrderSN);
-    // {CONFIRMADO - documentacao do upload_invoice_doc, 10/11/2026} vale pra
-    // vendedor local do Brasil; file_type: 1 = pdf, 2 = jpeg, 3 = png,
-    // 4 = xml; arquivo no campo "file", limite de 1 MB. Com file_type 3 (png)
-    // a Shopee devolvia "order.upload_invoice_error: File error.".
-    MultipartData.AddField('file_type', '1');
-    MultipartData.AddStream('file', TBytesStream.Create(APdfBytes),
-      'nota_fiscal_' + AOrderSN + '.pdf', 'application/pdf');
-    DoLog('UploadInvoiceDoc: enviando ' + IntToStr(Length(APdfBytes)) +
-      ' bytes para o pedido ' + AOrderSN);
+    // file_type: 1 = pdf, 2 = jpeg, 3 = png, 4 = xml (documentacao do
+    // upload_invoice_doc); no Brasil, 4.
+    MultipartData.AddField('file_type', '4');
+    MultipartData.AddStream('file', TBytesStream.Create(XmlBytes),
+      'NFe_' + AOrderSN + '.xml', 'text/xml');
+    DoLog('UploadInvoiceDoc: enviando XML da NF-e (' + IntToStr(Length(XmlBytes)) +
+      ' bytes) para o pedido ' + AOrderSN);
     Response := FHTTPClient.Post(URL, MultipartData);
     ResponseStr := Response.ContentAsString(TEncoding.UTF8);
     if Trim(ResponseStr).StartsWith('<') then
